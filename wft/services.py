@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from wft import __version__, engine, timings
@@ -48,6 +48,7 @@ class Tasks:
     on_my_requests: list[Task]   # ready, unclaimed steps on requests I own
     claimable: list[Task]        # ready, unclaimed steps on other people's requests
     drafts: list[RequestState]   # my requests not yet submitted
+    flagged: list[RequestState] = field(default_factory=list)  # requests I own with open impact flags
 
 
 @dataclass(frozen=True)
@@ -75,12 +76,22 @@ class Waiting:
 
 
 STATUS_FILTERS = {
-    "open": (engine.DRAFT, engine.ACTIVE),
+    "open": (engine.DRAFT, engine.ACTIVE, engine.ON_HOLD, engine.CANCELLING),
     "draft": (engine.DRAFT,),
     "active": (engine.ACTIVE,),
+    "on_hold": (engine.ON_HOLD,),
+    "cancelling": (engine.CANCELLING,),
     "completed": (engine.COMPLETED,),
+    "cancelled": (engine.CANCELLED,),
     "all": None,
 }
+
+
+@dataclass(frozen=True)
+class OpenFlag:
+    request: RequestState
+    flag: engine.Flag
+    step_title: str | None
 SORT_KEYS = {
     "age": lambda r: r.age,
     "in_step": lambda r: r.in_step if r.in_step is not None else -1,
@@ -278,8 +289,10 @@ class Services:
 
     def tasks(self, user: str | None = None) -> Tasks:
         user = (user or self.user).lower()
-        mine, on_mine, claimable, drafts = [], [], [], []
+        mine, on_mine, claimable, drafts, flagged = [], [], [], [], []
         for r in self.rm.list_requests():
+            if r.owner == user and any(f.open for f in r.flags):
+                flagged.append(r)
             if r.status == engine.DRAFT:
                 if r.owner == user:
                     drafts.append(r)
@@ -304,7 +317,73 @@ class Services:
                     claimable.append(task)
         oldest = lambda t: t.request.created_at  # noqa: E731
         return Tasks(sorted(mine, key=oldest), sorted(on_mine, key=oldest), sorted(claimable, key=oldest),
-                     sorted(drafts, key=lambda r: r.created_at))
+                     sorted(drafts, key=lambda r: r.created_at), sorted(flagged, key=lambda r: r.created_at))
+
+    def open_flags(self) -> list[OpenFlag]:
+        """Every unresolved or deferred impact flag, oldest first."""
+        out = []
+        for r in self.rm.list_requests():
+            if not r.flags:
+                continue
+            try:
+                defn = self.registry.get(r.workflow)
+            except KeyError:
+                defn = None
+            for f in r.flags:
+                if f.open:
+                    title = defn.step(f.step).title if defn and f.step else None
+                    out.append(OpenFlag(r, f, title))
+        return sorted(out, key=lambda o: (o.flag.resolution == engine.DEFERRED, o.flag.raised_at))
+
+    def follow_ups(self, request_id: str) -> list[RequestState]:
+        return [r for r in self.rm.list_requests() if r.follow_up_of == request_id]
+
+    def hold(self, request_id: str, reason: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.hold_request(state, defn, reason))
+
+    def resume(self, request_id: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.resume_request(state, defn))
+
+    def cancel(self, request_id: str, reason: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.cancel_request(state, defn, reason))
+
+    def resolve_flag(self, request_id: str, flag_id: str, resolution: str, notes: str = "",
+                     linked_request: str | None = None) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            if linked_request:
+                linked = self._find(linked_request)
+                if linked is None:
+                    raise CommandError(f"No request {linked_request!r} to link")
+                linked_request = linked.request_id
+            self._record(request_id, defn, engine.resolve_flag(state, flag_id, resolution, notes, linked_request))
+
+    def create_follow_up(self, request_id: str, title: str | None = None) -> str:
+        """A new request (latest version of the same workflow) linked to a finished one."""
+        state, defn = self._load(request_id)
+        if state.status not in engine.TERMINAL:
+            raise CommandError("Follow-up requests are for completed or cancelled requests; change this one directly")
+        latest = next(w for w in self.registry.latest() if w.id == defn.id)
+        title = (title or "").strip() or f"Follow-up to {state.reference or state.title}"
+        if not latest.runnable_by(__version__):
+            raise CommandError(f"{latest.title} needs WFT {latest.min_app_version} or later")
+        request_id_new = new_id()
+        with self._lock:
+            self._record(request_id_new, latest, engine.create_request(latest, title, follow_up_of=request_id))
+        return request_id_new
+
+    def _find(self, ref_or_id: str) -> RequestState | None:
+        ref_or_id = ref_or_id.strip()
+        state = self.rm.get(ref_or_id)
+        if state:
+            return state
+        return next((r for r in self.rm.list_requests() if (r.reference or "").lower() == ref_or_id.lower()), None)
 
     def start_step(self, request_id: str, step_id: str) -> None:
         with self._lock:

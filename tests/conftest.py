@@ -65,3 +65,9 @@ def ticking_clock(monkeypatch):
 def forms_registry(tmp_path) -> DefinitionRegistry:
     from tests.defs import FORMS, FORMS_FILES, write_defs
     return DefinitionRegistry.from_repo(write_defs(tmp_path / "forms-defs", FORMS, files=FORMS_FILES))
+
+
+@pytest.fixture
+def krm_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import LIFECYCLE, LIFECYCLE_FILES, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "krm-defs", LIFECYCLE, files=LIFECYCLE_FILES))

@@ -14,7 +14,13 @@
     {{ defn.title }} ({{ req.workflow }}) · created by {{ req.created_by }} at {{ req.created_at[:16] | replace("T", " ") }} UTC
     {% if req.submitted_at %}· submitted by {{ req.submitted_by }} at {{ req.submitted_at[:16] | replace("T", " ") }} UTC{% endif %}
     {% if req.status != "Draft" and not req.reference %}· reference pending{% endif %}
+    {% if req.holds %}· on hold {{ time_on_hold(req) | duration }} in total{% endif %}
   </p>
+  {% if original %}<p class="small">Follow-up to <a href="/requests/{{ original.request_id }}">{{ original.reference or original.title }}</a></p>{% endif %}
+  {% if follow_ups %}<p class="small">Follow-ups: {% for f in follow_ups %}<a href="/requests/{{ f.request_id }}">{{ f.reference or f.title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+  {% if req.status in ("Completed", "Cancelled", "Rejected") %}
+  <p>Owner: <strong>{{ req.owner | person }}</strong></p>
+  {% else %}
   <form method="post" action="/requests/{{ req.request_id }}/owner" class="row inline-form">
     <span>Owner: <strong>{{ req.owner | person }}</strong></span>
     <label class="sr-only" for="owner-select">New owner</label>
@@ -23,7 +29,77 @@
     </select>
     <button type="submit" class="secondary">Reassign</button>
   </form>
+  {% endif %}
 </section>
+
+{% set current_hold = req.holds | selectattr("end", "none") | first if req.holds else none %}
+{% if req.status == "OnHold" and current_hold %}
+<div class="banner banner-hold" role="status">
+  <strong>On hold</strong> since {{ current_hold.start | utc }} UTC by {{ current_hold.by | person }}: {{ current_hold.reason }}
+  <form method="post" action="/requests/{{ req.request_id }}/resume" class="inline"><button type="submit">Resume</button></form>
+</div>
+{% elif req.status == "Cancelling" %}
+<div class="banner banner-flag" role="status"><strong>Cancelling</strong> ({{ req.cancel_reason }}). Resolve the open flags below to finish cancelling.</div>
+{% elif req.status == "Cancelled" %}
+<div class="banner" role="status"><strong>Cancelled</strong> {{ req.cancelled_at | utc }} UTC: {{ req.cancel_reason }}</div>
+{% elif req.awaiting_flags %}
+<div class="banner banner-flag" role="status"><strong>All steps are done.</strong> Resolve the open flags below to complete the request.</div>
+{% endif %}
+
+{% if req.status in ("Completed", "Cancelled") %}
+<section class="card">
+  <form method="post" action="/requests/{{ req.request_id }}/follow-up" class="row inline-form">
+    <span class="muted">This request is {{ req.status | lower }} and can't be changed. Need something more?</span>
+    <label class="sr-only" for="fu-title">Title</label>
+    <input id="fu-title" name="title" placeholder="Follow-up to {{ req.reference or req.title }}">
+    <button type="submit" class="secondary">Create follow-up request</button>
+  </form>
+</section>
+{% elif req.status in ("Draft", "Active", "OnHold") %}
+<section class="card lifecycle row">
+  {% if req.status == "Active" %}
+  <details><summary>Put on hold…</summary>
+    <form method="post" action="/requests/{{ req.request_id }}/hold" class="row inline-form">
+      <label>Reason <input name="reason" required maxlength="500" placeholder="e.g. client paused the change"></label>
+      <button type="submit" class="secondary">Put on hold</button>
+    </form>
+  </details>
+  {% endif %}
+  <details><summary>Cancel request…</summary>
+    <form method="post" action="/requests/{{ req.request_id }}/cancel" class="row inline-form">
+      <label>Reason <input name="reason" required maxlength="500" placeholder="e.g. client withdrew the request"></label>
+      <button type="submit" class="danger">Cancel request</button>
+    </form>
+    {% if req.status != "Draft" %}<p class="help">Work already done on started steps will be flagged so someone can undo it if needed.</p>{% endif %}
+  </details>
+</section>
+{% endif %}
+
+{% if req.flags %}
+<section class="card" id="flags">
+  <h2>Impact flags</h2>
+  {% for f in req.flags %}
+  <div class="flag flag-{{ f.resolution or 'open' }}">
+    <p><span class="pill {{ 'pill-flag' if f.blocking else ('pill-waiting' if f.resolution == 'deferred' else 'pill-done') }}">{{ resolutions[f.resolution] if f.resolution else "Open" }}</span>
+      <strong>{{ defn.step(f.step).title if f.step else "Request" }}</strong>: {{ f.action }}
+      <span class="muted small">({{ f.trigger }} by {{ f.raised_by | person }}, {{ f.raised_at | utc }} UTC)</span></p>
+    {% if f.compensation %}<p class="small">To roll back: {{ f.compensation }}</p>{% endif %}
+    {% if f.resolution %}<p class="small muted">{{ resolutions[f.resolution] }} by {{ f.resolved_by | person }} at {{ f.resolved_at | utc }} UTC: {{ f.notes }}{% if f.linked_request %} · linked <a href="/requests/{{ f.linked_request }}">request</a>{% endif %}</p>{% endif %}
+    {% if f.open %}
+    <form method="post" action="/requests/{{ req.request_id }}/flags/resolve" class="row inline-form resolve-form">
+      <input type="hidden" name="flag" value="{{ f.id }}">
+      <label>Resolution
+        <select name="resolution">{% for k, label in resolutions.items() if not (f.resolution == "deferred" and k == "deferred") %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+      </label>
+      <label>Notes <input name="notes" required maxlength="1000" placeholder="What was done, or why not"></label>
+      <label>Linked request <input name="linked_request" maxlength="64" placeholder="Optional reference, e.g. REQ-2026-0012"></label>
+      <button type="submit" class="secondary">Resolve</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
 
 {% if req.status == "Draft" %}
 <section class="card draft">
@@ -143,12 +219,13 @@
   {% if s.status == "done" %}
   <p class="muted">Completed by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</p>
   {% endif %}
-  {% if s.transitions %}{% set t = step_timing(s) %}
+  {% if s.transitions %}{% set t = step_timing(s, none, req.holds) %}
   <p class="timings small muted">
     {% if t.ready_at %}Ready {{ t.ready_at | utc }}{% endif %}
     {% if t.started_at %} · started after {{ t.queued | duration }}{% endif %}
     {% if t.working %} · working {{ t.working | duration }}{% endif %}
     {% for reason, secs in t.waiting.items() %} · waiting on {{ wait_reasons[reason] | lower }} {{ secs | duration }}{% endfor %}
+    {% if t.held %} · on hold {{ t.held | duration }} (not counted){% endif %}
     {% if t.elapsed is not none %} · {{ "took" if t.finished_at else "open for" }} {{ t.elapsed | duration }}{% endif %}
   </p>
   {% endif %}

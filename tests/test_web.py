@@ -290,3 +290,37 @@ def test_oversized_upload_is_refused_up_front(services):
     services.attachments.max_bytes = 4
     r = client.post(f"/requests/{rid}/attachments", files={"file": ("big.bin", b"12345")})
     assert r.status_code == 413 and "larger than the 0 MB limit" in r.text
+
+
+def test_hold_cancel_flags_and_follow_up_pages(share, tmp_path, krm_registry):
+    from tests.conftest import make_services
+    svc = make_services(share, tmp_path / "k.sqlite", krm_registry)
+    client = client_for(svc)
+    rid = svc.create_request("krm@1", "ACC1 change")
+    svc.submit(rid, {"capture": {"account": "ACC1"}})
+    svc.start_step(rid, "raise")
+    page = client.get(f"/requests/{rid}").text
+    assert "Put on hold" in page and "Cancel request" in page
+    assert client.post(f"/requests/{rid}/hold", data={"reason": ""}).status_code == 409
+    client.post(f"/requests/{rid}/hold", data={"reason": "Client paused"})
+    page = client.get(f"/requests/{rid}").text
+    assert "<strong>On hold</strong>" in page and "Client paused" in page and "KRM22 may still approve ACC1" in page
+    assert 'class="badge badge-warn">1<' in page
+    client.post(f"/requests/{rid}/cancel", data={"reason": "Client withdrew"})
+    page = client.get(f"/requests/{rid}").text
+    assert "<strong>Cancelling</strong>" in page and "Withdraw KRM22 request for ACC1" in page
+    flags = client.get("/flags").text
+    assert "ACC1 change" in flags and "Withdraw the ACC1 request in KRM22" in flags
+    for f in svc.get(rid)[0].flags:
+        r = client.post(f"/requests/{rid}/flags/resolve", data={"flag": f.id, "resolution": "actioned", "notes": "Done"},
+                        headers={"Referer": f"{ORIGIN}/flags"}, follow_redirects=False)
+        assert r.headers["location"] == "/flags"
+    page = client.get(f"/requests/{rid}").text
+    assert "<strong>Cancelled</strong>" in page and "Create follow-up request" in page
+    assert "Reassign" not in page and "Put on hold" not in page  # nothing to change on a finished request
+    assert "No open flags" in client.get("/flags").text
+    r = client.post(f"/requests/{rid}/follow-up", data={"title": ""}, follow_redirects=False)
+    follow_page = client.get(r.headers["location"]).text
+    assert "Follow-up to" in follow_page and "status-draft" in follow_page
+    assert "Follow-ups:" in client.get(f"/requests/{rid}").text
+    assert ">Cancelled<" in client.get("/?status=cancelled").text or "Cancelled" in client.get("/?status=cancelled").text

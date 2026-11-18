@@ -63,3 +63,20 @@ FORMS_FILES = {
     "schemas/approval.schema.json": APPROVAL_SCHEMA,
     "samples/limits.yaml": {"capture": {"account": "ACC1", "limits": {"max": 10}}, "record": {"ticket": "K-1"}},
 }
+
+
+ACCOUNT_SCHEMA = {"type": "object", "required": ["account"], "properties": {"account": {"type": "string"}}}
+LIFECYCLE = {
+    "id": "krm", "version": 1, "title": "KRM22 change", "reference_prefix": "KRM",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "account.schema.json"},
+        {"id": "raise", "type": "manual", "title": "Raise in KRM22", "depends_on": ["capture"],
+         "checklist": ["Upload CSV"],
+         "on_hold": {"flag": "KRM22 may still approve {{ inputs.account }}"},
+         "on_cancel": {"flag": "Withdraw the {{ inputs.account }} request in KRM22"},
+         "compensation": {"checklist": "Withdraw KRM22 request for {{ inputs.account }}"}},
+        {"id": "apply", "type": "manual", "title": "Apply", "depends_on": ["raise"], "checklist": ["Apply"]},
+    ],
+}
+LIFECYCLE_FILES = {"schemas/account.schema.json": ACCOUNT_SCHEMA,
+                   "samples/krm.yaml": {"capture": {"account": "ACC1"}}}

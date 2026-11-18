@@ -20,6 +20,9 @@ from wft.events import Event
 
 REQUEST_CREATED = "request_created"
 REQUEST_SUBMITTED = "request_submitted"
+REQUEST_HELD = "request_held"          # payload: reason
+REQUEST_RESUMED = "request_resumed"
+REQUEST_CANCELLED = "request_cancelled"  # payload: reason (the request moves to Cancelling)
 FORM_SAVED = "form_saved"
 CHECKLIST_ITEM_SET = "checklist_item_set"
 STEP_STARTED = "step_started"
@@ -31,7 +34,9 @@ NOTE_ADDED = "note_added"
 OWNER_CHANGED = "owner_changed"
 STEP_ASSIGNMENT = "step_assignment"  # payload: step, mode (claim | assign | release), assignee
 ATTACHMENT_ADDED = "attachment_added"  # payload: name, size, sha256, path, step
-ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASSIGNMENT, ATTACHMENT_ADDED})
+FLAG_RESOLVED = "flag_resolved"  # payload: flag, resolution, notes, linked_request
+ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASSIGNMENT, ATTACHMENT_ADDED,
+                         FLAG_RESOLVED})
 ANNOTATION_SEQ = 0
 
 # Step types this version of the engine can run. Definitions using others fail validation.
@@ -39,7 +44,18 @@ SUPPORTED_STEP_TYPES = frozenset({"manual", "form"})
 
 DRAFT = "Draft"
 ACTIVE = "Active"
+ON_HOLD = "OnHold"
+CANCELLING = "Cancelling"
+CANCELLED = "Cancelled"
+REJECTED = "Rejected"  # reached via external-approval outcomes (#12)
 COMPLETED = "Completed"
+TERMINAL = frozenset({COMPLETED, CANCELLED, REJECTED})
+
+# Impact flags
+HOLD, CANCEL, AMEND = "hold", "cancel", "amend"
+ACTIONED, NOT_REQUIRED, DEFERRED = "actioned", "not_required", "deferred"
+RESOLUTIONS = {ACTIONED: "Actioned", NOT_REQUIRED: "Not required", DEFERRED: "Deferred"}
+GENERIC_ROLLBACK = "Manual rollback may be required"
 
 PENDING = "pending"
 READY = "ready"
@@ -140,6 +156,40 @@ class Attachment:
 
 
 @dataclass(frozen=True)
+class Hold:
+    start: str
+    by: str
+    reason: str
+    end: str | None = None
+
+
+@dataclass(frozen=True)
+class Flag:
+    """Work done outside WFT that a lifecycle change may need someone to deal with."""
+    id: str
+    step: str | None
+    trigger: str           # hold | cancel | amend
+    action: str            # what needs doing
+    compensation: str | None
+    raised_by: str
+    raised_at: str
+    resolution: str | None = None  # actioned | not_required | deferred
+    notes: str | None = None
+    linked_request: str | None = None
+    resolved_by: str | None = None
+    resolved_at: str | None = None
+
+    @property
+    def blocking(self) -> bool:
+        """Open flags stop a request reaching a final state; deferred ones stay visible but don't."""
+        return self.resolution is None
+
+    @property
+    def open(self) -> bool:
+        return self.resolution in (None, DEFERRED)
+
+
+@dataclass(frozen=True)
 class RequestState:
     request_id: str
     workflow: str  # "<id>@<version>"
@@ -159,6 +209,26 @@ class RequestState:
     owner: str = ""  # accountable person; the creator unless reassigned
     completed_at: str | None = None
     attachments: tuple[Attachment, ...] = ()
+    holds: tuple[Hold, ...] = ()
+    flags: tuple[Flag, ...] = ()
+    cancel_reason: str | None = None
+    cancelled_at: str | None = None
+    follow_up_of: str | None = None
+
+    def flag(self, flag_id: str) -> Flag:
+        for f in self.flags:
+            if f.id == flag_id:
+                return f
+        raise KeyError(flag_id)
+
+    @property
+    def blocking_flags(self) -> list[Flag]:
+        return [f for f in self.flags if f.blocking]
+
+    @property
+    def awaiting_flags(self) -> bool:
+        """Every step is finished, but open flags stop the request completing."""
+        return self.status == ACTIVE and all(s.status in FINISHED_STEP for s in self.steps) and bool(self.blocking_flags)
 
     def attachment(self, sha256: str) -> Attachment:
         for a in self.attachments:
@@ -226,11 +296,58 @@ def _friendly(e: jsonschema.ValidationError) -> str:
 
 # --- commands -------------------------------------------------------------
 
-def create_request(defn: WorkflowDef, title: str) -> NewEvent:
+def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = None) -> NewEvent:
     title = title.strip()
     if not title:
         raise CommandError("A title is required")
-    return NewEvent(REQUEST_CREATED, seq=1, payload={"title": title})
+    payload = {"title": title}
+    if follow_up_of:
+        payload["follow_up_of"] = follow_up_of
+    return NewEvent(REQUEST_CREATED, seq=1, payload=payload)
+
+
+def hold_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
+    if state.status != ACTIVE:
+        raise CommandError(f"Only Active requests can be put on hold (this one is {state.status})")
+    reason = reason.strip()
+    if not reason:
+        raise CommandError("Give a reason for the hold")
+    return NewEvent(REQUEST_HELD, seq=state.seq + 1, prev=state.last_event, payload={"reason": reason})
+
+
+def resume_request(state: RequestState, defn: WorkflowDef) -> NewEvent:
+    if state.status != ON_HOLD:
+        raise CommandError(f"Request isn't on hold (it's {state.status})")
+    return NewEvent(REQUEST_RESUMED, seq=state.seq + 1, prev=state.last_event)
+
+
+def cancel_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
+    if state.status not in (DRAFT, ACTIVE, ON_HOLD):
+        raise CommandError(f"A {state.status} request can't be cancelled")
+    reason = reason.strip()
+    if not reason:
+        raise CommandError("Give a reason for cancelling")
+    return NewEvent(REQUEST_CANCELLED, seq=state.seq + 1, prev=state.last_event, payload={"reason": reason})
+
+
+def resolve_flag(state: RequestState, flag_id: str, resolution: str, notes: str = "",
+                 linked_request: str | None = None) -> NewEvent:
+    try:
+        flag = state.flag(flag_id)
+    except KeyError:
+        raise CommandError("Unknown flag") from None
+    if not flag.open:
+        raise CommandError(f"This flag was already resolved as {RESOLUTIONS[flag.resolution].lower()}")
+    if resolution not in RESOLUTIONS:
+        raise CommandError("Choose actioned, not required or deferred")
+    notes = notes.strip()
+    if not notes:
+        raise CommandError({ACTIONED: "Say what was done", NOT_REQUIRED: "Say why it isn't required",
+                            DEFERRED: "Say why it's deferred and what's left to do"}[resolution])
+    if flag.resolution == DEFERRED and resolution == DEFERRED:
+        raise CommandError("This flag is already deferred")
+    return NewEvent(FLAG_RESOLVED, seq=ANNOTATION_SEQ, payload={
+        "flag": flag_id, "resolution": resolution, "notes": notes, "linked_request": linked_request or None})
 
 
 def save_form(state: RequestState, defn: WorkflowDef, step_id: str, data: dict) -> NewEvent:
@@ -321,6 +438,8 @@ def assign_reference(state: RequestState, reference: str) -> NewEvent:
 
 
 def change_owner(state: RequestState, new_owner: str) -> NewEvent:
+    if state.status in TERMINAL:
+        raise CommandError(f"A {state.status} request can't be changed; create a follow-up request instead")
     new_owner = new_owner.strip().lower()
     if not new_owner:
         raise CommandError("Choose who should own the request")
@@ -468,6 +587,7 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
             status=DRAFT, created_by=event.actor, created_at=event.ts, updated_at=event.ts,
             seq=event.seq, last_event=event.event_id, owner=event.actor,
             steps=tuple(StepState(s.id, PENDING) for s in defn.steps),
+            follow_up_of=event.payload.get("follow_up_of"),
         )
 
     if state is None:
@@ -477,6 +597,20 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         return _annotate(state, event)[0]
 
     state = replace(state, seq=event.seq, last_event=event.event_id, updated_at=event.ts)
+
+    if event.type == REQUEST_HELD:
+        flags = _raise_flags(state, defn, event, HOLD)
+        return replace(state, status=ON_HOLD, flags=state.flags + flags,
+                       holds=state.holds + (Hold(event.ts, event.actor, event.payload["reason"]),))
+
+    if event.type == REQUEST_RESUMED:
+        return replace(state, status=ACTIVE, holds=_end_hold(state.holds, event.ts))
+
+    if event.type == REQUEST_CANCELLED:
+        flags = _raise_flags(state, defn, event, CANCEL) if state.status != DRAFT else ()
+        state = replace(state, status=CANCELLING, flags=state.flags + flags, holds=_end_hold(state.holds, event.ts),
+                        cancel_reason=event.payload["reason"])
+        return _settle(state, event.ts)
 
     if event.type == FORM_SAVED:
         step = state.step(event.payload["step"])
@@ -537,6 +671,18 @@ def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
             Attachment(event.ts, event.actor, p["name"], p["size"], p["sha256"], p["path"], p.get("step")),)), True
     if event.type == OWNER_CHANGED:
         return replace(state, owner=event.payload["owner"]), True  # the latest change wins
+    if event.type == FLAG_RESOLVED:
+        p = event.payload
+        try:
+            flag = state.flag(p["flag"])
+        except KeyError:
+            return state, False
+        if not flag.open or (flag.resolution == DEFERRED and p["resolution"] == DEFERRED):
+            return state, False  # someone else resolved it first
+        flag = replace(flag, resolution=p["resolution"], notes=p["notes"], linked_request=p.get("linked_request"),
+                       resolved_by=event.actor, resolved_at=event.ts)
+        state = replace(state, flags=tuple(flag if f.id == flag.id else f for f in state.flags))
+        return _settle(state, max(event.ts, state.updated_at)), True
     if event.type == STEP_ASSIGNMENT:
         try:
             step = state.step(event.payload["step"])
@@ -546,6 +692,57 @@ def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
             return state, False  # someone else claimed it first: claims are exclusive
         return _replace_step(state, replace(step, assignee=event.payload["assignee"])), True
     raise ValueError(f"Unknown annotation {event.type!r}")
+
+
+def _end_hold(holds: tuple[Hold, ...], ts: str) -> tuple[Hold, ...]:
+    return tuple(replace(h, end=ts) if h.end is None else h for h in holds)
+
+
+def _raise_flags(state: RequestState, defn: WorkflowDef, event: Event, trigger: str) -> tuple[Flag, ...]:
+    """Flags for steps whose outside-WFT work a hold or cancel may affect.
+
+    Cancel: every started, waiting or done step, except pure data-capture forms
+    without an `on_cancel`. Hold: in-flight steps that declare `on_hold`.
+    """
+    from wft.expressions import ExpressionError, parse  # local: keeps the engine's import surface small
+
+    context = {"inputs": state.inputs, "request": {"reference": state.reference, "title": state.title},
+               "steps": {s.id: {**(s.data or {}), "status": s.status} for s in state.steps}}
+
+    def render(text: str | None) -> str | None:
+        if not text:
+            return None
+        try:
+            return str(parse(text).render(context))
+        except ExpressionError:
+            return text
+
+    flags = []
+    for st in state.steps:
+        sd = defn.step(st.id)
+        hook = sd.raw.get(f"on_{trigger}") or {}
+        if trigger == HOLD:
+            if not hook or st.status not in (IN_PROGRESS, WAITING):
+                continue
+        elif trigger == CANCEL:
+            if st.status not in (IN_PROGRESS, WAITING, DONE) or (sd.type == "form" and not hook):
+                continue
+        compensation = render((sd.raw.get("compensation") or {}).get("checklist"))
+        flags.append(Flag(id=f"{event.event_id}:{st.id}", step=st.id, trigger=trigger,
+                          action=render(hook.get("flag")) or GENERIC_ROLLBACK, compensation=compensation,
+                          raised_by=event.actor, raised_at=event.ts))
+    return tuple(flags)
+
+
+def _settle(state: RequestState, ts: str) -> RequestState:
+    """Reach a final state once nothing (no open flag) stands in the way."""
+    if state.blocking_flags:
+        return state
+    if state.status == CANCELLING:
+        return replace(state, status=CANCELLED, cancelled_at=ts)
+    if state.status == ACTIVE and all(s.status in FINISHED_STEP for s in state.steps):
+        return replace(state, status=COMPLETED, completed_at=ts)
+    return state
 
 
 def _to(step: StepState, status: str, event: Event, reason: str | None = None, note: str | None = None) -> StepState:
@@ -572,9 +769,7 @@ def _advance(state: RequestState, defn: WorkflowDef, event: Event) -> RequestSta
         if s.status == PENDING and set(defn.step(s.id).depends_on) <= finished else s
         for s in state.steps
     )
-    if all(s.status in FINISHED_STEP for s in steps):
-        return replace(state, steps=steps, status=COMPLETED, completed_at=event.ts)
-    return replace(state, steps=steps)
+    return _settle(replace(state, steps=steps), event.ts)
 
 
 @dataclass(frozen=True)
@@ -635,6 +830,6 @@ def replay(events: Iterable[Event], defn: WorkflowDef) -> Replay:
         raise ValueError("No events to replay")
     for e in annotations(events):
         state, effective = _annotate(state, e)
-        if not effective and e.type == STEP_ASSIGNMENT:
-            losers.append(e)  # a claim that lost to an earlier one is reported like any other conflict
+        if not effective and e.type in (STEP_ASSIGNMENT, FLAG_RESOLVED):
+            losers.append(e)  # lost to an earlier claim/resolution: reported like any other conflict
     return Replay(state, tuple(losers))

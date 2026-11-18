@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Impact flags{% endblock %}
+{% block content %}
+<h1>Impact flags</h1>
+<p class="muted">Work done outside WFT that a hold or cancellation may need someone to deal with. Open flags stop a request
+finishing; deferred ones stay here until they're actioned or marked not required.</p>
+<section class="card">
+  {% if items %}
+  <table>
+    <thead><tr><th>Request</th><th>Step</th><th>Raised by</th><th>Action needed</th><th>Raised (UTC)</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for o in items %}
+    <tr>
+      <td>{{ o.request.reference or "—" }}<br><a href="/requests/{{ o.request.request_id }}#flags">{{ o.request.title }}</a>
+          <span class="status status-{{ o.request.status | lower }}">{{ o.request.status }}</span></td>
+      <td>{{ o.step_title or "—" }}</td>
+      <td>{{ o.flag.trigger | capitalize }}</td>
+      <td>{{ o.flag.action }}{% if o.flag.compensation %}<br><span class="muted small">{{ o.flag.compensation }}</span>{% endif %}</td>
+      <td>{{ o.flag.raised_at | utc }}<br><span class="muted small">by {{ o.flag.raised_by | person }}</span></td>
+      <td>{% if o.flag.resolution %}<span class="pill pill-waiting">Deferred</span>{% else %}<span class="pill pill-flag">Open</span>{% endif %}</td>
+      <td><a href="/requests/{{ o.request.request_id }}#flags">Resolve</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No open flags.</p>
+  {% endif %}
+</section>
+{% endblock %}

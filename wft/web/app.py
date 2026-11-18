@@ -30,11 +30,14 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     templates.env.filters["duration"] = timings.format_duration
     templates.env.filters["filesize"] = _filesize
     templates.env.filters["utc"] = lambda ts: (ts or "")[:16].replace("T", " ")
-    templates.env.globals.update(wait_reasons=engine.WAIT_REASONS, step_timing=timings.step_timing)
+    templates.env.globals.update(wait_reasons=engine.WAIT_REASONS, step_timing=timings.step_timing,
+                                 resolutions=engine.RESOLUTIONS, time_on_hold=timings.time_on_hold,
+                                 status_labels=STATUS_LABELS)
 
     def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
         ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()],
-                   is_admin=services.is_admin, my_task_count=len(services.tasks().mine))
+                   is_admin=services.is_admin, my_task_count=len(services.tasks().mine),
+                   open_flag_count=sum(1 for o in services.open_flags() if o.flag.blocking))
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
     def back_to(request_id: str) -> RedirectResponse:
@@ -101,6 +104,36 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         return render(request, "index.html", rows=rows, workflows=workflows, filters=filters,
                       people=services.people(), status_filters=list(STATUS_FILTERS))
 
+    @app.get("/flags")
+    def flags(request: Request):
+        return render(request, "flags.html", items=services.open_flags())
+
+    @app.post("/requests/{request_id}/hold")
+    def hold(request_id: str, reason: Annotated[str, Form()] = ""):
+        services.hold(request_id, reason)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/resume")
+    def resume_request(request_id: str):
+        services.resume(request_id)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/cancel")
+    def cancel(request_id: str, reason: Annotated[str, Form()] = ""):
+        services.cancel(request_id, reason)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/flags/resolve")
+    def resolve_flag(request: Request, request_id: str, flag: Annotated[str, Form()],
+                     resolution: Annotated[str, Form()], notes: Annotated[str, Form()] = "",
+                     linked_request: Annotated[str, Form()] = ""):
+        services.resolve_flag(request_id, flag, resolution, notes, linked_request or None)
+        return RedirectResponse(_back(request, f"/requests/{request_id}#flags"), status_code=303)
+
+    @app.post("/requests/{request_id}/follow-up")
+    def follow_up(request_id: str, title: Annotated[str, Form()] = ""):
+        return back_to(services.create_follow_up(request_id, title))
+
     @app.get("/waiting")
     def waiting(request: Request):
         return render(request, "waiting.html", board=services.waiting_board())
@@ -137,7 +170,10 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
             data = values.get(sd.id, st.draft if st.data is None else st.data)
             step_errors = {f"{sd.id}.{k}": v for k, v in (errors.get(sd.id) or {}).items()}
             forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.")
+        follow_ups = services.follow_ups(request_id)
+        original = services.rm.get(state.follow_up_of) if state.follow_up_of else None
         return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
+                      follow_ups=follow_ups, original=original,
                       editable=editable_forms(state, defn), form_errors=errors,
                       history=services.rm.history(request_id))
 
@@ -217,6 +253,10 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     return app
 
 
+STATUS_LABELS = {"open": "Open", "draft": "Draft", "active": "Active", "on_hold": "On hold",
+                 "cancelling": "Cancelling", "completed": "Completed", "cancelled": "Cancelled", "all": "All"}
+
+
 def _filesize(n: int) -> str:
     for unit in ("bytes", "KB", "MB"):
         if n < 1024 or unit == "MB":
@@ -228,7 +268,7 @@ def _filesize(n: int) -> str:
 def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
-    return path if path in ("/", "/tasks", "/waiting") or path.startswith("/requests/") else default
+    return path if path in ("/", "/tasks", "/waiting", "/flags") or path.startswith("/requests/") else default
 
 
 def editable_forms(state, defn) -> list:
@@ -247,6 +287,13 @@ def _describe(services: Services, e: Event) -> dict:
         what = f"{'ticking' if e.payload['checked'] else 'unticking'} item {e.payload['index'] + 1} of step {e.payload['step']!r}"
     elif e.type == engine.STEP_COMPLETED:
         what = f"completing step {e.payload['step']!r}"
+    elif e.type in (engine.REQUEST_HELD, engine.REQUEST_RESUMED, engine.REQUEST_CANCELLED):
+        what = {engine.REQUEST_HELD: "putting the request on hold", engine.REQUEST_RESUMED: "resuming the request",
+                engine.REQUEST_CANCELLED: "cancelling the request"}[e.type]
+    elif e.type == engine.FLAG_RESOLVED:
+        what = f"resolving a flag as {engine.RESOLUTIONS[e.payload['resolution']].lower()}"
+    elif e.type in (engine.STEP_WAITING, engine.STEP_RESUMED, engine.STEP_STARTED):
+        what = f"{e.type.replace('_', ' ').replace('step ', '')} step {e.payload['step']!r}"
     elif e.type == engine.STEP_ASSIGNMENT:
         what = f"claiming step {e.payload['step']!r}"
     elif e.type == engine.FORM_SAVED:

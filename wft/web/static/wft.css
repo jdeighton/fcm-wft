@@ -80,3 +80,22 @@ th a { color:inherit; text-decoration:none; } th a:hover { text-decoration:under
 .wait-form form { margin-top:6px; }
 .timings { margin:6px 0 0; }
 .upload-form { margin-top:10px; }
+.banner { margin:0 0 16px; padding:10px 16px; border-radius:8px; border:1px solid var(--line); background:var(--card); display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.banner form.inline { display:inline; }
+.banner-hold { background:#fef0c7; color:#7a2e0e; border-color:#fedf89; }
+.banner-flag { background:#fee4e2; color:#7a271a; border-color:#fecdca; }
+@media (prefers-color-scheme: dark) { .banner-hold { background:#4e1d09; color:#fedf89; border-color:#7a2e0e; } .banner-flag { background:#55160c; color:#fecdca; border-color:#7a271a; } }
+.lifecycle { gap:24px; }
+.lifecycle summary { cursor:pointer; color:var(--accent); }
+.lifecycle form { margin-top:6px; }
+button.danger { background:#d92d20; border-color:#d92d20; color:#fff; }
+.pill-flag { color:#d92d20; border-color:#d92d20; }
+.badge-warn { background:#d92d20; }
+.flag { border-left:3px solid #d92d20; padding:4px 0 6px 10px; margin-bottom:10px; }
+.flag-actioned, .flag-not_required { border-left-color:var(--line); }
+.flag-deferred { border-left-color:var(--warn); }
+.flag p { margin:2px 0; }
+.resolve-form { margin-top:6px; }
+.status-onhold { color:var(--warn); border-color:var(--warn); }
+.status-cancelling { color:#d92d20; border-color:#d92d20; }
+.status-cancelled { color:var(--muted); }

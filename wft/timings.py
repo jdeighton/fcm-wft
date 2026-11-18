@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from wft.engine import DONE, IN_PROGRESS, READY, SKIPPED, WAITING, RequestState, StepState
+from wft.engine import DONE, IN_PROGRESS, READY, SKIPPED, WAITING, Hold, RequestState, StepState
 
 
 def parse_ts(ts: str) -> datetime:
@@ -38,18 +38,30 @@ class StepTiming:
     working: float = 0.0
     waiting: dict[str, float] = field(default_factory=dict)
     elapsed: float | None = None
+    held: float = 0.0  # time the request was on hold while this step was open; excluded from the other figures
 
     @property
     def waiting_total(self) -> float:
         return sum(self.waiting.values())
 
 
-def step_timing(step: StepState, now: datetime | None = None) -> StepTiming:
-    """Timing for one step from its transitions. Open states run up to `now`."""
+def _overlap(start: str, end: str | datetime, holds: tuple[Hold, ...], now: datetime) -> float:
+    """Seconds of [start, end) during which the request was on hold."""
+    a = parse_ts(start)
+    b = parse_ts(end) if isinstance(end, str) else end
+    total = 0.0
+    for h in holds:
+        hs, he = parse_ts(h.start), parse_ts(h.end) if h.end else now
+        total += max(0.0, (min(b, he) - max(a, hs)).total_seconds())
+    return total
+
+
+def step_timing(step: StepState, now: datetime | None = None, holds: tuple[Hold, ...] = ()) -> StepTiming:
+    """Timing for one step from its transitions. Open states run up to `now`; time on hold is set aside."""
     now = now or now_utc()
     if not step.transitions:
         return StepTiming()
-    queued = working = 0.0
+    queued = working = held = 0.0
     waiting: dict[str, float] = {}
     ready_at = started_at = finished_at = None
     for i, t in enumerate(step.transitions):
@@ -61,7 +73,9 @@ def step_timing(step: StepState, now: datetime | None = None) -> StepTiming:
         if t.status in (DONE, SKIPPED):
             finished_at = t.ts
             continue
-        span = seconds_between(t.ts, end or now)
+        on_hold = _overlap(t.ts, end or now, holds, now)
+        held += on_hold
+        span = seconds_between(t.ts, end or now) - on_hold
         if t.status == READY:
             queued += span
         elif t.status == IN_PROGRESS:
@@ -69,13 +83,19 @@ def step_timing(step: StepState, now: datetime | None = None) -> StepTiming:
         elif t.status == WAITING:
             waiting[t.reason or "other"] = waiting.get(t.reason or "other", 0.0) + span
     begin = ready_at or step.transitions[0].ts
-    elapsed = seconds_between(begin, finished_at or now)
-    return StepTiming(ready_at, started_at, finished_at, queued, working, waiting, elapsed)
+    elapsed = seconds_between(begin, finished_at or now) - held
+    return StepTiming(ready_at, started_at, finished_at, queued, working, waiting, elapsed, held)
+
+
+def time_on_hold(state: RequestState, now: datetime | None = None) -> float:
+    now = now or now_utc()
+    return sum(seconds_between(h.start, h.end or now) for h in state.holds)
 
 
 def request_age(state: RequestState, now: datetime | None = None) -> float:
     """Since the request was submitted (or created, for a Draft) until it completed, or now."""
-    return seconds_between(state.submitted_at or state.created_at, state.completed_at or now or now_utc())
+    end = state.completed_at or state.cancelled_at or now or now_utc()
+    return seconds_between(state.submitted_at or state.created_at, end)
 
 
 def time_in_current_step(state: RequestState, now: datetime | None = None) -> float | None:

@@ -154,7 +154,8 @@ Active / OnHold ──cancel──▶ Cancelling ──all impact flags resolved
 ### 6.5 Impact flags
 
 - **FR-5.1** An impact flag records: the request, the affected step or child request, the trigger (hold / amend / cancel), a description of the required action, and who raised it and when.
-- **FR-5.2** A flag is resolved as one of: **actioned** (notes; optional link to a follow-up request), **not required** (reason mandatory), or **deferred** (notes; remains visible on the dashboard but does not block terminal states — TBD, see [§14](#14-open-items--assumptions)).
+- **FR-5.2** A flag is resolved as one of: **actioned** (notes; optional link to a follow-up request), **not required** (reason mandatory), or **deferred** (notes; remains visible on the Flags page but does not block terminal states). A deferred flag can later be resolved as actioned or not required. Resolutions sit outside the per-request sequence; if two people resolve the same flag at once, the first wins and the other sees a conflict.
+- **FR-5.2a Which steps are flagged:** on **cancel**, every step that was started, waiting or done, except data-capture `form` steps without an `on_cancel`; on **hold**, only in-flight (started or waiting) steps that declare `on_hold`. Flag and compensation text may use expressions (e.g. `{{ inputs.account }}`).
 - **FR-5.3** Step definitions may include an optional `compensation` block (a checklist or a workflow to start). In Release 1 no workflows define compensation workflows; flags display the step's compensation checklist text if present, otherwise a generic "manual rollback may be required".
 
 ### 6.6 Release 1 workflows
@@ -540,7 +541,7 @@ No baseline of current paper cycle times will be collected. Success is judged on
 | 4 | Build the TT data dictionary (user, account, limits) from existing API code and paper forms. | TT schema owner |
 | 5 | Confirm per-user TT API keys are available for prod and UAT, and their read permissions. | TBD |
 | 6 | Confirm share locations for prod and UAT and NTFS permissions for the 10 users. | TBD |
-| 7 | Confirm whether *deferred* impact flags block terminal states (proposed: no, but they stay visible). | Team |
+| 7 | ~~Confirm whether *deferred* impact flags block terminal states~~ Decided: they don't block, but stay visible on the Flags page (#9). | Team |
 | 8 | Confirm whether users run on physical desktops or shared hosts (design handles both). | TBD |
 | 9 | Name the team of 3, the admins, and the TT schema owner. | Product owner |
 
