@@ -14,7 +14,7 @@ from typing import Iterable
 
 from wft import engine
 from wft.definitions import DefinitionRegistry
-from wft.engine import Note, RequestState, StepState, Transition
+from wft.engine import Attachment, Note, RequestState, StepState, Transition
 from wft.events import Event
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS journal_cursor (
 """
 TABLES = ("events", "requests", "conflicts", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 
 class ReadModel:
@@ -172,4 +172,5 @@ def _load_state(text: str) -> RequestState:
                                     "transitions": tuple(Transition(**t) for t in s["transitions"])})
                        for s in d["steps"])
     d["notes"] = tuple(Note(**n) for n in d["notes"])
+    d["attachments"] = tuple(Attachment(**a) for a in d["attachments"])
     return RequestState(**d)

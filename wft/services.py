@@ -12,7 +12,8 @@ from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
 from wft.readmodel import ReadModel
-from wft.repository import ReferenceAllocator, ReferenceUnavailable, Repository, ShareUnavailable
+from wft.repository import (AttachmentStore, AttachmentTooLarge, ReferenceAllocator, ReferenceUnavailable, Repository,
+                            ShareUnavailable)
 from wft.team import Team, TeamSource
 
 log = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ DEFAULT_REFERENCE_PREFIX = "REQ"
 
 
 class NotFound(Exception):
+    pass
+
+
+class FileTooLarge(CommandError):
     pass
 
 
@@ -99,7 +104,8 @@ class Status:
 class Services:
     def __init__(self, repo: Repository, read_model: ReadModel, registry: DefinitionRegistry,
                  user: str, host: str, acknowledged_path: Path | None = None,
-                 references: ReferenceAllocator | None = None, team: TeamSource | None = None):
+                 references: ReferenceAllocator | None = None, team: TeamSource | None = None,
+                 attachments: AttachmentStore | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
@@ -108,6 +114,7 @@ class Services:
         self._acknowledged_path = acknowledged_path
         self.references = references
         self.team_source = team
+        self.attachments = attachments
         self._lock = threading.Lock()
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -379,6 +386,41 @@ class Services:
         with self._lock:
             state, defn = self._load(request_id)
             self._record(request_id, defn, engine.complete_form(state, defn, step_id, data))
+
+    def add_attachment(self, request_id: str, name: str, stream, step_id: str | None = None) -> str:
+        """Store a file write-once on the share and record it on the request. Returns its SHA-256."""
+        if self.attachments is None:
+            raise CommandError("Attachments aren't available")
+        if self._read_only_reason is not None:
+            raise ReadOnly("The share is unavailable, so files can't be attached until it's back")
+        _, defn = self._load(request_id)
+        engine.check_step_exists(defn, step_id)  # before spending time uploading
+        try:
+            stored = self.attachments.put(request_id, name, stream)  # slow over the network: not under the lock
+        except AttachmentTooLarge as e:
+            raise FileTooLarge(str(e)) from e
+        except OSError as e:
+            self._go_read_only(e)
+            raise ReadOnly("The share became unavailable; the file was not attached") from e
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.add_attachment(
+                state, defn, name, stored.size, stored.sha256, stored.path, step_id))
+        return stored.sha256
+
+    def attachment_file(self, request_id: str, sha256: str):
+        """(attachment, path on the share) for downloading."""
+        state, _ = self._load(request_id)
+        try:
+            att = state.attachment(sha256)
+        except KeyError:
+            raise NotFound(f"{request_id} attachment {sha256[:12]}") from None
+        if self.attachments is None:
+            raise CommandError("Attachments aren't available")
+        try:
+            return att, self.attachments.open_path(att.path)
+        except FileNotFoundError:
+            raise CommandError(f"{att.name} isn't on the shared drive (is it reachable?)") from None
 
     def add_note(self, request_id: str, text: str) -> None:
         with self._lock:

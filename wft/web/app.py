@@ -6,14 +6,14 @@ from urllib.parse import urlsplit
 from typing import Annotated
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from wft import __version__, engine, timings
 from wft.engine import CommandError
 from wft.events import Event
-from wft.services import STATUS_FILTERS, NotFound, ReadOnly, Services
+from wft.services import STATUS_FILTERS, FileTooLarge, NotFound, ReadOnly, Services
 from wft.web import security
 from wft.web.forms import build_fields, parse_form
 
@@ -28,6 +28,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     templates.env.globals.update(env=env, user=services.user)
     templates.env.filters["person"] = lambda u: services.team.name(u) if u else "—"
     templates.env.filters["duration"] = timings.format_duration
+    templates.env.filters["filesize"] = _filesize
     templates.env.filters["utc"] = lambda ts: (ts or "")[:16].replace("T", " ")
     templates.env.globals.update(wait_reasons=engine.WAIT_REASONS, step_timing=timings.step_timing)
 
@@ -45,7 +46,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
 
     @app.exception_handler(CommandError)
     def command_error(request: Request, exc: CommandError):
-        return render(request, "error.html", 409, message=str(exc))
+        return render(request, "error.html", 413 if isinstance(exc, FileTooLarge) else 409, message=str(exc))
 
     @app.exception_handler(ReadOnly)
     def read_only(request: Request, exc: ReadOnly):
@@ -176,6 +177,28 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         services.submit(request_id, {})
         return back_to(request_id)
 
+    @app.post("/requests/{request_id}/attachments")
+    async def upload(request: Request, request_id: str):
+        declared = int(request.headers.get("content-length") or 0)
+        if declared > engine.MAX_ATTACHMENT_BYTES + 1024 * 1024:  # refuse before reading the body
+            return render(request, "error.html", 413,
+                          message=f"That file is too large: the limit is {engine.MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB")
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not getattr(upload, "filename", ""):
+            raise CommandError("Choose a file to attach")
+        step = (form.get("step") or "").strip() or None
+        try:
+            services.add_attachment(request_id, upload.filename, upload.file, step)
+        finally:
+            await upload.close()
+        return RedirectResponse(f"/requests/{request_id}#attachments", status_code=303)
+
+    @app.get("/requests/{request_id}/attachments/{sha256}")
+    def download(request_id: str, sha256: str):
+        att, path = services.attachment_file(request_id, sha256)
+        return FileResponse(path, filename=att.name, media_type="application/octet-stream")
+
     @app.post("/requests/{request_id}/notes")
     def add_note(request_id: str, text: Annotated[str, Form()]):
         services.add_note(request_id, text)
@@ -192,6 +215,14 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         return back_to(request_id)
 
     return app
+
+
+def _filesize(n: int) -> str:
+    for unit in ("bytes", "KB", "MB"):
+        if n < 1024 or unit == "MB":
+            return f"{n} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} MB"
 
 
 def _back(request: Request, default: str) -> str:
