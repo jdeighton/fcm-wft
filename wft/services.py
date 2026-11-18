@@ -338,6 +338,18 @@ class Services:
     def follow_ups(self, request_id: str) -> list[RequestState]:
         return [r for r in self.rm.list_requests() if r.follow_up_of == request_id]
 
+    def amend_preview(self, request_id: str, forms: dict[str, dict]) -> engine.Impact:
+        """Validate an amendment and say what it would do, without recording anything."""
+        state, defn = self._load(request_id)
+        event = engine.amend_request(state, defn, forms)  # validates; raises if nothing changed
+        new_inputs = {k: v for data in event.payload["forms"].values() for k, v in data.items()}
+        return engine.amend_impact(state, defn, new_inputs)
+
+    def amend(self, request_id: str, forms: dict[str, dict]) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.amend_request(state, defn, forms))
+
     def hold(self, request_id: str, reason: str) -> None:
         with self._lock:
             state, defn = self._load(request_id)

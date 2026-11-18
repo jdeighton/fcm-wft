@@ -73,6 +73,7 @@ def step_timing(step: StepState, now: datetime | None = None, holds: tuple[Hold,
         if t.status in (DONE, SKIPPED):
             finished_at = t.ts
             continue
+        finished_at = None  # reopened (e.g. reset by an amendment): it isn't finished any more
         on_hold = _overlap(t.ts, end or now, holds, now)
         held += on_hold
         span = seconds_between(t.ts, end or now) - on_hold

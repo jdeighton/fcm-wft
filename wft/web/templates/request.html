@@ -57,6 +57,9 @@
 </section>
 {% elif req.status in ("Draft", "Active", "OnHold") %}
 <section class="card lifecycle row">
+  {% if req.status in ("Active", "OnHold") and defn.steps | selectattr("type", "equalto", "form") | selectattr("depends_on", "equalto", ()) | list %}
+  <a href="/requests/{{ req.request_id }}/amend" class="button-link">Amend details…</a>
+  {% endif %}
   {% if req.status == "Active" %}
   <details><summary>Put on hold…</summary>
     <form method="post" action="/requests/{{ req.request_id }}/hold" class="row inline-form">
@@ -219,7 +222,7 @@
   {% if s.status == "done" %}
   <p class="muted">Completed by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</p>
   {% endif %}
-  {% if s.transitions %}{% set t = step_timing(s, none, req.holds) %}
+  {% if s.transitions and s.status != "pending" %}{% set t = step_timing(s, none, req.holds) %}
   <p class="timings small muted">
     {% if t.ready_at %}Ready {{ t.ready_at | utc }}{% endif %}
     {% if t.started_at %} · started after {{ t.queued | duration }}{% endif %}
@@ -286,7 +289,7 @@
     <tbody>
     {% for e in history %}
       <tr><td>{{ e.ts[:19] | replace("T", " ") }}</td><td>{{ e.actor }}</td><td>{{ e.type | replace("_", " ") }}</td>
-          <td>{% if e.type == "note_added" %}{{ e.payload.text }}{% elif e.type == "reference_assigned" %}{{ e.payload.reference }}{% elif e.type == "attachment_added" %}{{ e.payload.name }} ({{ e.payload.size | filesize }}, sha256 {{ e.payload.sha256[:12] }}…){% else %}<code>{{ e.payload | tojson }}</code>{% endif %}</td></tr>
+          <td>{% if e.type == "note_added" %}{{ e.payload.text }}{% elif e.type == "reference_assigned" %}{{ e.payload.reference }}{% elif e.type == "request_amended" %}{% for c in e.payload.changes %}<code>{{ c.field }}</code>: {{ c.before if c.before is not none else "—" }} → {{ c.after if c.after is not none else "—" }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% elif e.type == "attachment_added" %}{{ e.payload.name }} ({{ e.payload.size | filesize }}, sha256 {{ e.payload.sha256[:12] }}…){% else %}<code>{{ e.payload | tojson }}</code>{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>

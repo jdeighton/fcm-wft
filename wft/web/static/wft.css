@@ -99,3 +99,5 @@ button.danger { background:#d92d20; border-color:#d92d20; color:#fff; }
 .status-onhold { color:var(--warn); border-color:var(--warn); }
 .status-cancelling { color:#d92d20; border-color:#d92d20; }
 .status-cancelled { color:var(--muted); }
+.button-link { color:var(--accent); }
+.impact h3 { font-size:.95rem; margin:12px 0 4px; }

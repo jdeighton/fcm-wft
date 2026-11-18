@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% from "_form.html" import field %}
+{% block title %}Amend {{ req.reference or req.title }}{% endblock %}
+{# The page after a POST (preview or errors) must never auto-reload. #}
+{% block autorefresh %}{{ 'false' if (impact or form_errors) else 'true' }}{% endblock %}
+{% block content %}
+<p><a href="/requests/{{ req.request_id }}">← Back to {{ req.reference or req.title }}</a></p>
+<section class="card">
+  <h1>Amend {{ req.reference or "" }} {{ req.title }}</h1>
+  <p class="muted">Change the request's details. You'll see what the change affects before it's applied.
+    Steps not started yet just use the new details; steps already worked on that use a changed field get a
+    "needs re-check" flag, and some may send the workflow back to an earlier step.</p>
+</section>
+
+{% if impact %}
+<section class="card impact" id="impact">
+  <h2>What this amendment changes</h2>
+  <table>
+    <thead><tr><th>Field</th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+    {% for f, before, after in impact.changes %}
+      <tr><td><code>{{ f }}</code></td><td>{{ before if before is not none else "—" }}</td><td><strong>{{ after if after is not none else "—" }}</strong></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if impact.flagged %}
+  <h3>Steps that will be flagged for re-checking</h3>
+  <ul>{% for sid, action, hits in impact.flagged %}<li><strong>{{ step_titles[sid] }}</strong>: {{ action }} <span class="muted small">(uses {{ hits | join(", ") }})</span></li>{% endfor %}</ul>
+  {% else %}
+  <p class="muted">No step already worked on uses the changed fields, so nothing will be flagged.</p>
+  {% endif %}
+  {% if impact.reset %}
+  <h3>Steps that will need doing again</h3>
+  <p>The workflow goes back to
+    <strong>{% for sid in impact.route_to %}{{ step_titles[sid] }}{% if not loop.last %}, {% endif %}{% endfor %}</strong>.
+    These steps will be reopened:
+    {% for sid in impact.reset %}{{ step_titles[sid] }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <form method="post" action="/requests/{{ req.request_id }}/amend" class="form" novalidate>
+    {% if form_errors %}<p class="field-error" role="alert">Some fields need attention.</p>{% endif %}
+    {% for sd in capture %}
+      {% if capture | length > 1 %}<h3>{{ sd.title }}</h3>{% endif %}
+      {% for f in forms[sd.id] %}{{ field(f) }}{% endfor %}
+    {% endfor %}
+    <div class="actions">
+      <button type="submit" name="_action" value="preview" class="secondary">{{ "Preview again" if impact else "Preview changes" }}</button>
+      {% if impact %}<button type="submit" name="_action" value="apply">Apply amendment</button>{% endif %}
+    </div>
+  </form>
+</section>
+{% endblock %}

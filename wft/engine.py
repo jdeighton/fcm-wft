@@ -23,6 +23,7 @@ REQUEST_SUBMITTED = "request_submitted"
 REQUEST_HELD = "request_held"          # payload: reason
 REQUEST_RESUMED = "request_resumed"
 REQUEST_CANCELLED = "request_cancelled"  # payload: reason (the request moves to Cancelling)
+REQUEST_AMENDED = "request_amended"      # payload: forms (new initial form data), changes [{field, before, after}]
 FORM_SAVED = "form_saved"
 CHECKLIST_ITEM_SET = "checklist_item_set"
 STEP_STARTED = "step_started"
@@ -304,6 +305,98 @@ def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = Non
     if follow_up_of:
         payload["follow_up_of"] = follow_up_of
     return NewEvent(REQUEST_CREATED, seq=1, payload=payload)
+
+
+# --- amendments --------------------------------------------------------------
+
+_MISSING = object()
+
+
+def field_changes(before: Any, after: Any, prefix: str = "") -> list[tuple[str, Any, Any]]:
+    """Dotted field paths whose values differ. Lists are compared whole (e.g. `users`)."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        out = []
+        for key in sorted(set(before) | set(after), key=str):
+            out += field_changes(before.get(key, _MISSING), after.get(key, _MISSING), f"{prefix}{key}.")
+        return out
+    if before == after:
+        return []
+    clean = lambda v: None if v is _MISSING else v  # noqa: E731
+    return [(prefix.rstrip("."), clean(before), clean(after))]
+
+
+def consumes_match(pattern: str, path: str) -> bool:
+    """Whether a `consumes` pattern covers a changed field. Either may be a prefix of the other; `*` matches any part."""
+    p, c = pattern.split("."), path.split(".")
+    return all(a == "*" or a == b for a, b in zip(p, c))
+
+
+def _descendants(defn: WorkflowDef, step_id: str) -> list[str]:
+    """Steps that depend, directly or not, on `step_id`, in definition order."""
+    found, changed = {step_id}, True
+    while changed:
+        changed = False
+        for s in defn.steps:
+            if s.id not in found and found & set(s.depends_on):
+                found.add(s.id)
+                changed = True
+    return [s.id for s in defn.steps if s.id in found and s.id != step_id]
+
+
+@dataclass(frozen=True)
+class Impact:
+    changes: list[tuple[str, Any, Any]]
+    flagged: list[tuple[str, str, list[str]]]  # (step, action text, fields it uses that changed)
+    route_to: list[str]                        # steps the workflow goes back to
+    reset: list[str]                           # steps reset to be done again (route targets and what follows)
+
+
+def amend_impact(state: RequestState, defn: WorkflowDef, new_inputs: dict) -> Impact:
+    """What amending the inputs to `new_inputs` would change. Pure; used for the preview and when applying."""
+    changes = field_changes(state.inputs, new_inputs)
+    changed = [c[0] for c in changes]
+    initial = {sd.id for sd in initial_forms(defn)}
+    flagged, routes = [], []
+    for st in state.steps:
+        sd = defn.step(st.id)
+        if st.id in initial or st.status not in (IN_PROGRESS, WAITING, DONE):
+            continue  # steps not started yet simply use the new data
+        hits = sorted({f for f in changed for pattern in sd.raw.get("consumes", ()) if consumes_match(pattern, f)})
+        if not hits:
+            continue
+        hook = sd.raw.get("on_amend") or {}
+        action = hook.get("flag") or f"Needs re-check: {', '.join(hits)} changed"
+        flagged.append((st.id, action, hits))
+        if hook.get("route_to") and hook["route_to"] not in routes:
+            routes.append(hook["route_to"])
+    reset: list[str] = []
+    for target in routes:
+        for sid in [target, *_descendants(defn, target)]:
+            if sid not in reset and state.step(sid).status != PENDING:
+                reset.append(sid)
+    return Impact(changes, flagged, routes, reset)
+
+
+def amend_request(state: RequestState, defn: WorkflowDef, forms: dict[str, dict]) -> NewEvent:
+    """Change the request's inputs (its initial form data). Validated like a submit."""
+    if state.status not in (ACTIVE, ON_HOLD):
+        raise CommandError(f"Only Active or on-hold requests can be amended (this one is {state.status})")
+    capture = initial_forms(defn)
+    if not capture:
+        raise CommandError("This workflow has no input form to amend")
+    data, new_inputs = {}, {}
+    for sd in capture:
+        values = forms.get(sd.id, {})
+        errors = validate_form(sd.form_schema or {}, values)
+        if errors:
+            raise FormInvalid(sd.id, errors)
+        data[sd.id] = values
+        new_inputs.update(values)
+    changes = field_changes(state.inputs, new_inputs)
+    if not changes:
+        raise CommandError("Nothing has changed")
+    return NewEvent(REQUEST_AMENDED, seq=state.seq + 1, prev=state.last_event, payload={
+        "forms": data, "changes": [{"field": f, "before": b, "after": a} for f, b, a in changes]})
 
 
 def hold_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
@@ -612,6 +705,9 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
                         cancel_reason=event.payload["reason"])
         return _settle(state, event.ts)
 
+    if event.type == REQUEST_AMENDED:
+        return _amend(state, defn, event)
+
     if event.type == FORM_SAVED:
         step = state.step(event.payload["step"])
         if state.status == ACTIVE:
@@ -692,6 +788,28 @@ def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
             return state, False  # someone else claimed it first: claims are exclusive
         return _replace_step(state, replace(step, assignee=event.payload["assignee"])), True
     raise ValueError(f"Unknown annotation {event.type!r}")
+
+
+def _amend(state: RequestState, defn: WorkflowDef, event: Event) -> RequestState:
+    new_inputs: dict = {}
+    for data in event.payload["forms"].values():
+        new_inputs.update(data)
+    impact = amend_impact(state, defn, new_inputs)
+    flags = tuple(
+        Flag(id=f"{event.event_id}:{sid}", step=sid, trigger=AMEND, action=action, compensation=None,
+             raised_by=event.actor, raised_at=event.ts)
+        for sid, action, _ in impact.flagged)
+    for step_id, data in event.payload["forms"].items():
+        state = _replace_step(state, replace(state.step(step_id), data=data))
+    for sid in impact.reset:
+        st = state.step(sid)
+        target = sid in impact.route_to
+        st = _to(st, READY if target else PENDING, event, reason="amended")
+        # Done again from scratch; earlier form data is kept as a draft to edit.
+        state = _replace_step(state, replace(st, ticked=frozenset(), completed_by=None, completed_at=None,
+                                             draft=st.data if st.data is not None else st.draft, data=None))
+    state = replace(state, inputs=new_inputs, flags=state.flags + flags)
+    return _advance(state, defn, event) if state.status == ACTIVE else state
 
 
 def _end_hold(holds: tuple[Hold, ...], ts: str) -> tuple[Hold, ...]:

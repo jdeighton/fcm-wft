@@ -150,6 +150,9 @@ Active / OnHold ──cancel──▶ Cancelling ──all impact flags resolved
   - completed or in-progress steps that consumed a changed field raise an impact flag ("needs re-check");
   - where a step defines it, the workflow is routed back to that step (e.g. KRM22 CSV step).
 - **FR-4.3** Amendments are recorded with before/after values.
+- **FR-4.4** What can be amended: the request's inputs (its initial capture form data), while Active or OnHold, validated like a submit. The user previews the changed fields, the steps that will be flagged and any steps that will be reopened before applying.
+- **FR-4.5** Matching: a `consumes` pattern covers a changed field when either is a prefix of the other (`*` matches any part), so `limits.*` covers `limits.max` and a change to the whole `limits` group. Only steps already started, waiting or done are flagged; the flag uses `on_amend.flag` or "Needs re-check: <fields> changed".
+- **FR-4.6** `on_amend.route_to` must name a step the declaring step depends on (checked by the validator). The target is reopened as ready and every step after it returns to pending, with ticks cleared and earlier form data kept as a draft.
 
 ### 6.5 Impact flags
 

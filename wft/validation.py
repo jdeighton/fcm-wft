@@ -207,7 +207,12 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
         for wf, what in ((s.get("workflow"), "sub-workflow"), ((s.get("compensation") or {}).get("workflow"), "compensation workflow")):
             if wf and wf not in known_ids:
                 err(f"step {s['id']!r}: {what} {wf!r} is not a known workflow")
-    cycle = _find_cycle({s["id"]: [d for d in s.get("depends_on", ()) if d in step_ids] for s in steps})
+    deps = {s["id"]: [d for d in s.get("depends_on", ()) if d in step_ids] for s in steps}
+    for s in steps:
+        target = (s.get("on_amend") or {}).get("route_to")
+        if target in step_ids and target not in _ancestors(deps, s["id"]):
+            err(f"step {s['id']!r}: on_amend.route_to {target!r} must be a step it depends on (directly or not)")
+    cycle = _find_cycle(deps)
     if cycle:
         err(f"dependency cycle: {' -> '.join(cycle)}")
     else:
@@ -293,6 +298,17 @@ def _routes(step: dict) -> Iterator[tuple[str, str]]:
         yield branch["next"], f"branch {i + 1}"
     if step.get("default"):
         yield step["default"], "default branch"
+
+
+def _ancestors(deps: dict[str, list[str]], node: str) -> set[str]:
+    seen: set[str] = set()
+    todo = list(deps.get(node, ()))
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo.extend(deps.get(n, ()))
+    return seen
 
 
 def _find_cycle(graph: dict[str, list[str]]) -> list[str] | None:

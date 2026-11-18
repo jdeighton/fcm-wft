@@ -108,6 +108,40 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     def flags(request: Request):
         return render(request, "flags.html", items=services.open_flags())
 
+    def amend_page(request: Request, request_id: str, status_code: int = 200, values=None, errors=None,
+                   impact=None) -> HTMLResponse:
+        state, defn = services.get(request_id)
+        capture = engine.initial_forms(defn)
+        values, errors = values or {}, errors or {}
+        forms = {}
+        for sd in capture:
+            step_errors = {f"{sd.id}.{k}": v for k, v in (errors.get(sd.id) or {}).items()}
+            forms[sd.id] = build_fields(sd.form_schema or {}, values.get(sd.id, state.step(sd.id).data or {}),
+                                        step_errors, f"{sd.id}.")
+        titles = {s.id: s.title for s in defn.steps}
+        return render(request, "amend.html", status_code, req=state, defn=defn, capture=capture, forms=forms,
+                      impact=impact, step_titles=titles, form_errors=errors)
+
+    @app.get("/requests/{request_id}/amend")
+    def amend_form(request: Request, request_id: str):
+        return amend_page(request, request_id)
+
+    @app.post("/requests/{request_id}/amend")
+    async def amend(request: Request, request_id: str):
+        _, defn = services.get(request_id)
+        posted = await request.form()
+        form = {k: posted.getlist(k) for k in posted.keys()}
+        action = (form.pop("_action", ["preview"]) or ["preview"])[0]
+        data = {sd.id: parse_form(sd.form_schema or {}, form, f"{sd.id}.") for sd in engine.initial_forms(defn)}
+        try:
+            if action == "apply":
+                services.amend(request_id, data)
+                return back_to(request_id)
+            impact = services.amend_preview(request_id, data)
+        except engine.FormInvalid as e:
+            return amend_page(request, request_id, 422, values=data, errors={e.step_id: e.errors})
+        return amend_page(request, request_id, values=data, impact=impact)
+
     @app.post("/requests/{request_id}/hold")
     def hold(request_id: str, reason: Annotated[str, Form()] = ""):
         services.hold(request_id, reason)
@@ -287,6 +321,8 @@ def _describe(services: Services, e: Event) -> dict:
         what = f"{'ticking' if e.payload['checked'] else 'unticking'} item {e.payload['index'] + 1} of step {e.payload['step']!r}"
     elif e.type == engine.STEP_COMPLETED:
         what = f"completing step {e.payload['step']!r}"
+    elif e.type == engine.REQUEST_AMENDED:
+        what = "amending the request"
     elif e.type in (engine.REQUEST_HELD, engine.REQUEST_RESUMED, engine.REQUEST_CANCELLED):
         what = {engine.REQUEST_HELD: "putting the request on hold", engine.REQUEST_RESUMED: "resuming the request",
                 engine.REQUEST_CANCELLED: "cancelling the request"}[e.type]
