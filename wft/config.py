@@ -9,12 +9,18 @@ from pathlib import Path
 
 import yaml
 
+from wft.adapters.tt import TTSettings
+
 ENVIRONMENTS = ("prod", "uat")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENVIRONMENT_RULES = REPO_ROOT / "config" / "environments.yaml"
 ENV_MARKER = Path("meta") / "environment"
 # Every key an env file may contain; keep `.env.example` in step.
-SUPPORTED_KEYS = ("WFT_SHARE_ROOT", "WFT_PORT", "WFT_DEFINITIONS_DIR")
+SUPPORTED_KEYS = ("WFT_SHARE_ROOT", "WFT_PORT", "WFT_DEFINITIONS_DIR",
+                  "WFT_TT_BASE_URL", "WFT_TT_ENVIRONMENT", "WFT_TT_APP_KEY", "WFT_TT_APP_SECRET",
+                  "WFT_TT_APP_NAME", "WFT_TT_COMPANY", "WFT_TT_CACHE_MINUTES")
+SECRET_KEYS = ("WFT_TT_APP_KEY", "WFT_TT_APP_SECRET")  # never shown in messages or logs
+FAKE_TT = "fake:"
 
 
 class ConfigError(Exception):
@@ -28,6 +34,13 @@ class Config:
     port: int
     home: Path
     definitions_dir: Path | None  # development only: run unpublished definitions from a repo folder
+    tt: TTSettings | None = None  # None: TT not configured (lookups fall back to typing)
+    tt_fake: bool = False         # WFT_TT_BASE_URL=fake: uses sample data instead of TT
+    picklist_ttl_minutes: float = 60.0
+
+    @property
+    def picklist_cache_path(self) -> Path:
+        return self.home / "cache" / f"picklists-{self.env}.json"
 
     @property
     def cache_path(self) -> Path:
@@ -62,11 +75,12 @@ def check_environment(env: str, values: dict[str, str], rules: dict[str, dict[st
     problems = []
     for key, value in values.items():
         own = rules.get(env, {}).get(key)
+        shown = "<hidden>" if key in SECRET_KEYS else value
         if own is not None and not any(re.search(p, value, re.IGNORECASE) for p in own):
-            problems.append(f"{key}={value} does not look like a {env} value")
+            problems.append(f"{key}={shown} does not look like a {env} value")
         for other, other_rules in rules.items():
             if other != env and any(re.search(p, value, re.IGNORECASE) for p in other_rules.get(key, ())):
-                problems.append(f"{key}={value} looks like a {other} value")
+                problems.append(f"{key}={shown} looks like a {other} value")
     if problems:
         raise ConfigError(f"The {env} env file mixes environments:\n  " + "\n  ".join(problems))
 
@@ -109,5 +123,24 @@ def load_config(env: str, home: Path | None = None,
         raise ConfigError(f"WFT_PORT must be a number in {env_file}") from e
 
     definitions_dir = Path(values["WFT_DEFINITIONS_DIR"]) if values.get("WFT_DEFINITIONS_DIR") else None
+    tt, tt_fake = _tt_settings(values, env_file)
+    try:
+        ttl = float(values.get("WFT_TT_CACHE_MINUTES", "60"))
+    except ValueError as e:
+        raise ConfigError(f"WFT_TT_CACHE_MINUTES must be a number in {env_file}") from e
     return Config(env=env, share_root=Path(share_root), port=port, home=home,
-                  definitions_dir=definitions_dir)
+                  definitions_dir=definitions_dir, tt=tt, tt_fake=tt_fake, picklist_ttl_minutes=ttl)
+
+
+def _tt_settings(values: dict[str, str], env_file: Path) -> tuple[TTSettings | None, bool]:
+    base = values.get("WFT_TT_BASE_URL", "").strip()
+    if not base:
+        return None, False
+    if base == FAKE_TT:
+        return None, True
+    missing = [k for k in ("WFT_TT_ENVIRONMENT", "WFT_TT_APP_KEY", "WFT_TT_APP_SECRET") if not values.get(k)]
+    if missing:
+        raise ConfigError(f"WFT_TT_BASE_URL is set but {', '.join(missing)} missing in {env_file}")
+    return TTSettings(base_url=base, environment=values["WFT_TT_ENVIRONMENT"], app_key=values["WFT_TT_APP_KEY"],
+                      app_secret=values["WFT_TT_APP_SECRET"], app_name=values.get("WFT_TT_APP_NAME", "WFT"),
+                      company=values.get("WFT_TT_COMPANY", "FIRM")), False

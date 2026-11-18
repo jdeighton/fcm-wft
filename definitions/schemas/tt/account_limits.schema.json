@@ -1,0 +1,18 @@
+{
+  "$comment": "DRAFT TT limit-change capture form. Confirm fields against the TT data dictionary (owner: TT schema owner) before use (#14).",
+  "type": "object",
+  "required": ["account", "limits"],
+  "properties": {
+    "account": {"type": "string", "title": "TT account", "x-picklist": "tt.accounts", "minLength": 1},
+    "current": {"type": "object", "title": "Current limits in TT", "description": "Filled from TT; for reference"},
+    "limits": {
+      "type": "object", "title": "Requested limits", "required": ["max_position"],
+      "properties": {
+        "max_position": {"type": "number", "minimum": 0, "title": "Max position"},
+        "max_order_qty": {"type": "number", "minimum": 0, "title": "Max order quantity"},
+        "credit": {"type": "number", "minimum": 0, "title": "Credit limit"}
+      }
+    },
+    "justification": {"type": "string", "maxLength": 2000, "title": "Justification"}
+  }
+}

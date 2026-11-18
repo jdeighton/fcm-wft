@@ -101,3 +101,9 @@ button.danger { background:#d92d20; border-color:#d92d20; color:#fff; }
 .status-cancelled { color:var(--muted); }
 .button-link { color:var(--accent); }
 .impact h3 { font-size:.95rem; margin:12px 0 4px; }
+.warn { color:var(--warn); }
+.check { font-weight:600; margin:6px 0; }
+.check-match { color:var(--ok); } .check-mismatch { color:#d92d20; } .check-unavailable { color:var(--warn); }
+table.compare tr.differs td { background:rgba(217,45,32,.08); }
+.verify-actions { gap:12px; align-items:end; margin:8px 0; }
+.data-field .label { font-size:.9rem; }

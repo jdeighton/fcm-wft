@@ -41,6 +41,7 @@ database is needed. See the [PRD](docs/PRD.md) for the full design.
 | Environment marker on each share | `<share>\meta\environment` | A file containing `prod` or `uat`. WFT refuses to start if it doesn't match `--env`. |
 | Per-user env files | `%USERPROFILE%\.wft\prod.env`, `uat.env` | Copy from [`.env.example`](.env.example). Never commit real env files. |
 | Published definitions | `python scripts/publish_definitions.py --env prod` | WFT only runs published workflows. Publishing to prod requires `definitions/` to be committed. |
+| TT REST API details | `wft/adapters/tt.py` (`ENDPOINTS`) | The token request and endpoint paths are best understanding, not confirmed from TT's docs. Compare with your existing TT API code, then run `python scripts/tt_smoke.py --env uat` with your own key. |
 | Python packages | Artifactory | Install `requirements.txt`. `jsonschema` pulls in `rpds-py`, which needs a Windows wheel. |
 
 ## Running locally

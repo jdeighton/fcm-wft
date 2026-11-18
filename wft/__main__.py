@@ -16,6 +16,9 @@ from wft.readmodel import ReadModel
 from wft.engine import MAX_ATTACHMENT_BYTES
 from wft.repository import (AttachmentStore, FileRepository, InstanceLock, InstanceLockError, ReferenceAllocator,
                             default_identity)
+from wft.adapters.cache import PicklistCache
+from wft.adapters.fake import FakeTT
+from wft.adapters.tt import TTAdapter
 from wft.services import Services
 from wft.team import REPO_ROLES_FILE, ROLES_FILE, TeamSource
 from wft.web import security
@@ -37,6 +40,17 @@ def bind_socket(preferred_port: int) -> socket.socket:
         except OSError:
             sock.close()
     raise OSError("No free port available")
+
+
+def build_adapters(config) -> dict:
+    if config.tt_fake:
+        print("WFT: using FAKE TT data (WFT_TT_BASE_URL=fake:)")
+        return {"tt": FakeTT()}
+    if config.tt:
+        print(f"WFT: TT lookups via {config.tt.label} ({config.tt.base_url})")
+        return {"tt": TTAdapter(config.tt)}
+    print("WFT: TT isn't configured; lookups fall back to typing values")
+    return {}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
                             acknowledged_path=config.home / "acknowledged-conflicts.json",
                             references=ReferenceAllocator(config.share_root), team=team,
-                            attachments=AttachmentStore(config.share_root, MAX_ATTACHMENT_BYTES))
+                            attachments=AttachmentStore(config.share_root, MAX_ATTACHMENT_BYTES),
+                            adapters=build_adapters(config),
+                            picklists=PicklistCache(config.picklist_cache_path, config.picklist_ttl_minutes * 60))
         services.sync()
         services.start_polling()
         app = create_app(services, config.env, token, port)

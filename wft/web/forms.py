@@ -11,6 +11,7 @@ boolean, nested objects, arrays of enum values (checkboxes), arrays of scalars
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -29,6 +30,8 @@ class Field:
     options: list = field(default_factory=list)
     error: str | None = None
     step: str | None = None
+    picklist: str | None = None         # name of the trading-system list offered as suggestions
+    picklist_warning: str | None = None
     children: list[Field] = field(default_factory=list)
     rows: list[list[Field]] = field(default_factory=list)
 
@@ -40,7 +43,8 @@ def humanise(name: str) -> str:
 def kind_of(schema: dict) -> str:
     t = schema.get("type")
     if t == "object":
-        return "group"
+        # An object with no listed fields holds data filled in from elsewhere (e.g. `prefill`): shown, not edited.
+        return "group" if schema.get("properties") else "data"
     if t == "array":
         items = schema.get("items") or {}
         if "enum" in items:
@@ -62,8 +66,10 @@ def kind_of(schema: dict) -> str:
 
 
 def build_fields(schema: dict, data: Any, errors: Mapping[str, str] | None = None,
-                 prefix: str = "") -> list[Field]:
+                 prefix: str = "", picklists: Mapping[str, Any] | None = None) -> list[Field]:
+    """`picklists` maps a picklist name (e.g. `tt.accounts`) to a `Picklist` of suggestions."""
     errors = errors or {}
+    picklists = picklists or {}
     data = data if isinstance(data, dict) else {}
     required = set(schema.get("required") or ())
     out = []
@@ -72,12 +78,21 @@ def build_fields(schema: dict, data: Any, errors: Mapping[str, str] | None = Non
         f = Field(name=name, label=sub.get("title") or humanise(key), kind=kind_of(sub),
                   required=key in required, help=sub.get("description"), value=data.get(key),
                   error=errors.get(name))
+        if sub.get("x-picklist") and f.kind == "text":
+            f.picklist = sub["x-picklist"]
+            p = picklists.get(f.picklist)
+            if p is not None:
+                f.options = [(e.id, e.name) for e in p.items]
+                if p.error:
+                    f.picklist_warning = (f"Couldn't get the latest list ({p.error}). "
+                                          + ("Showing the last saved list; " if p.items else "")
+                                          + "you can type the value.")
         if f.kind == "group":
-            f.children = build_fields(sub, data.get(key), errors, f"{name}.")
+            f.children = build_fields(sub, data.get(key), errors, f"{name}.", picklists)
         elif f.kind == "rows":
             existing = data.get(key) if isinstance(data.get(key), list) else []
             item_schema = sub.get("items") or {}
-            f.rows = [build_fields(item_schema, row, errors, f"{name}.{i}.")
+            f.rows = [build_fields(item_schema, row, errors, f"{name}.{i}.", picklists)
                       for i, row in enumerate([*existing, {}])]
         elif f.kind == "choices":
             f.options = list(sub["items"]["enum"])
@@ -102,6 +117,13 @@ def parse_form(schema: dict, form: Mapping[str, list[str]], prefix: str = "") ->
             value = parse_form(sub, form, f"{name}.")
             if value:
                 out[key] = value
+        elif kind == "data":
+            raw = _first(form, f"{name}.__json")
+            if raw:
+                try:
+                    out[key] = json.loads(raw)
+                except ValueError:
+                    pass
         elif kind == "rows":
             indices = sorted({int(m.group(1)) for k in form
                               if (m := re.match(re.escape(name) + r"\.(\d+)\.", k))})
@@ -147,3 +169,16 @@ def _scalar(schema: dict, raw: str) -> Any:
     if t == "boolean":
         return raw.lower() in ("true", "on", "yes", "1")
     return raw
+
+
+def picklist_names(schema: Any) -> set[str]:
+    """Every `x-picklist` used in a form schema."""
+    names: set[str] = set()
+    if isinstance(schema, dict):
+        if isinstance(schema.get("x-picklist"), str):
+            names.add(schema["x-picklist"])
+        for sub in (schema.get("properties") or {}).values():
+            names |= picklist_names(sub)
+        if isinstance(schema.get("items"), dict):
+            names |= picklist_names(schema["items"])
+    return names

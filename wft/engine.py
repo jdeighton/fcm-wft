@@ -30,6 +30,7 @@ STEP_STARTED = "step_started"
 STEP_WAITING = "step_waiting"    # payload: step, reason, note
 STEP_RESUMED = "step_resumed"
 STEP_COMPLETED = "step_completed"
+VERIFY_CHECKED = "verify_checked"  # payload: step, check {outcome, key, expected, actual, differences, source, error}
 REFERENCE_ASSIGNED = "reference_assigned"
 NOTE_ADDED = "note_added"
 OWNER_CHANGED = "owner_changed"
@@ -41,7 +42,10 @@ ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASS
 ANNOTATION_SEQ = 0
 
 # Step types this version of the engine can run. Definitions using others fail validation.
-SUPPORTED_STEP_TYPES = frozenset({"manual", "form"})
+SUPPORTED_STEP_TYPES = frozenset({"manual", "form", "verify"})
+
+# Outcomes of checking a verify step against a trading system
+MATCH, MISMATCH, UNAVAILABLE = "match", "mismatch", "unavailable"
 
 DRAFT = "Draft"
 ACTIVE = "Active"
@@ -399,6 +403,62 @@ def amend_request(state: RequestState, defn: WorkflowDef, forms: dict[str, dict]
         "forms": data, "changes": [{"field": f, "before": b, "after": a} for f, b, a in changes]})
 
 
+# --- verify steps ---------------------------------------------------------------
+
+def context(state: RequestState) -> dict:
+    """What definition expressions can see: inputs, step data and the request."""
+    return {"inputs": state.inputs, "request": {"reference": state.reference, "title": state.title},
+            "steps": {s.id: {**(s.data or {}), "status": s.status} for s in state.steps}}
+
+
+def verify_target(state: RequestState, defn: WorkflowDef, step_id: str) -> tuple[str, Any, Any]:
+    """(adapter operation, key, expected values) for a verify step, with expressions filled in."""
+    from wft.expressions import parse
+    sd = defn.step(step_id)
+    if sd.type != "verify":
+        raise CommandError(f"Step {step_id!r} is not a verify step")
+    ctx = context(state)
+    render = lambda v: parse(v).render(ctx) if isinstance(v, str) else v  # noqa: E731
+    return sd.raw["adapter"], render(sd.raw.get("key")), render(sd.raw.get("expected"))
+
+
+def record_check(state: RequestState, defn: WorkflowDef, step_id: str, check: dict) -> NewEvent:
+    """Record the result of checking a verify step against the trading system (done by the caller)."""
+    _verify_step(state, defn, step_id)
+    if check.get("outcome") not in (MATCH, MISMATCH, UNAVAILABLE):
+        raise CommandError("Unknown check outcome")
+    return NewEvent(VERIFY_CHECKED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id, "check": check})
+
+
+def accept_verification(state: RequestState, defn: WorkflowDef, step_id: str, notes: str = "") -> NewEvent:
+    step = _verify_step(state, defn, step_id)
+    last = (step.data or {}).get("last_check")
+    if not last or last["outcome"] == UNAVAILABLE:
+        raise CommandError("Check it against the trading system first, or complete it manually with notes")
+    notes = notes.strip()
+    if last["outcome"] == MISMATCH and not notes:
+        raise CommandError("Say why the differences are acceptable")
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={
+        "step": step_id, "data": {"result": "accepted", "notes": notes or None, "last_check": last}})
+
+
+def complete_verification_manually(state: RequestState, defn: WorkflowDef, step_id: str, notes: str) -> NewEvent:
+    """When the trading system can't be checked from WFT: someone checked by hand."""
+    step = _verify_step(state, defn, step_id)
+    notes = notes.strip()
+    if not notes:
+        raise CommandError("Say how it was checked")
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={
+        "step": step_id, "data": {"result": "manual", "notes": notes, "last_check": (step.data or {}).get("last_check")}})
+
+
+def _verify_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
+    step = _workable_step(state, defn, step_id)
+    if defn.step(step_id).type != "verify":
+        raise CommandError(f"Step {step_id!r} is not a verify step")
+    return step
+
+
 def hold_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
     if state.status != ACTIVE:
         raise CommandError(f"Only Active requests can be put on hold (this one is {state.status})")
@@ -490,6 +550,8 @@ def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEv
     step = _workable_step(state, defn, step_id)
     if defn.step(step_id).type == "form":
         raise CommandError(f"Step {step_id!r} is a form; submit the form to complete it")
+    if defn.step(step_id).type == "verify":
+        raise CommandError(f"Step {step_id!r} is a check; check it, then accept it or complete it manually")
     missing = len(defn.step(step_id).checklist) - len(step.ticked)
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
@@ -629,6 +691,9 @@ def actions(state: RequestState, defn: WorkflowDef,
         elif sd.type == "form":
             out.append((f"submit {step.id}",
                         [lambda s, sid=step.id: complete_form(s, defn, sid, samples.get(sid, {}))]))
+        elif sd.type == "verify":
+            out.append((f"verify {step.id}",
+                        [lambda s, sid=step.id: complete_verification_manually(s, defn, sid, "dry run")]))
     return out
 
 
@@ -733,6 +798,11 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         ticked = step.ticked | {idx} if event.payload["checked"] else step.ticked - {idx}
         return _replace_step(state, replace(step, ticked=frozenset(ticked)))
 
+    if event.type == VERIFY_CHECKED:
+        step = _start(state.step(event.payload["step"]), event)
+        check = {**event.payload["check"], "checked_at": event.ts, "checked_by": event.actor}
+        return _replace_step(state, replace(step, data={**(step.data or {}), "last_check": check}))
+
     if event.type == STEP_STARTED:
         return _replace_step(state, _start(state.step(event.payload["step"]), event))
 
@@ -824,14 +894,13 @@ def _raise_flags(state: RequestState, defn: WorkflowDef, event: Event, trigger: 
     """
     from wft.expressions import ExpressionError, parse  # local: keeps the engine's import surface small
 
-    context = {"inputs": state.inputs, "request": {"reference": state.reference, "title": state.title},
-               "steps": {s.id: {**(s.data or {}), "status": s.status} for s in state.steps}}
+    ctx = context(state)
 
     def render(text: str | None) -> str | None:
         if not text:
             return None
         try:
-            return str(parse(text).render(context))
+            return str(parse(text).render(ctx))
         except ExpressionError:
             return text
 

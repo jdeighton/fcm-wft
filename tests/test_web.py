@@ -353,3 +353,34 @@ def test_amend_preview_and_apply(share, tmp_path, amend_registry):
     raise_section = page[page.index("Raise in KRM22 <span class=\"pill pill-pending\""):page.index('id="attachments"')]
     assert "open for" not in raise_section.split("</section>")[0]  # a reset (pending) step shows no running timer
     assert client.post(f"/requests/{rid}/amend", data={**form, "_action": "apply"}).status_code == 409  # nothing changed
+
+
+def test_picklist_prefill_and_verify_pages(tt_services):
+    client = client_for(tt_services)
+    rid = client.post("/requests", data={"workflow": "tt_limits@1", "title": "x"},
+                      follow_redirects=False).headers["location"].rsplit("/", 1)[1]
+    page = client.get(f"/requests/{rid}").text
+    assert 'list="f-capture-account-list"' in page and '<option value="ACC7">ACC7 – Sample Fund</option>' in page
+    assert "Fill current values from TT" in page and "Suggestions from TT" in page
+    client.post(f"/requests/{rid}/forms", data={"_action": "prefill", "capture.account": "ACC7"})
+    assert tt_services.get(rid)[0].step("capture").draft["current"]["max"] == 2500
+    tt_services.adapters["tt"].available = False
+    page = client.post(f"/requests/{rid}/forms", data={"_action": "prefill", "capture.account": "ACC7"}).text
+    assert "Couldn&#39;t fill from the trading system" in page or "Couldn't fill from the trading system" in page
+    tt_services.picklists.clear()
+    assert "you can type the value" in client.get(f"/requests/{rid}").text
+    tt_services.adapters["tt"].available = True
+
+    tt_services.submit(rid, {"capture": {"account": "ACC1", "limits": {"max": 999}}})
+    tt_services.set_checklist_item(rid, "apply", 0, True)
+    tt_services.complete_step(rid, "apply")
+    page = client.get(f"/requests/{rid}").text
+    assert "Checks <strong>ACC1</strong>" in page and ">Check in TT<" in page
+    client.post(f"/requests/{rid}/steps/check/verify/check")
+    page = client.get(f"/requests/{rid}").text
+    assert "Differences found" in page and 'class="differs"' in page and "Why the differences are OK" in page
+    assert client.post(f"/requests/{rid}/steps/check/verify/accept", data={"notes": ""}).status_code == 409
+    client.post(f"/requests/{rid}/steps/check/verify/accept", data={"notes": "Agreed with risk to keep 1000"})
+    page = client.get(f"/requests/{rid}").text
+    assert "Accepted: Agreed with risk" in page and "status-completed" in page
+    assert client.post("/picklists/refresh", follow_redirects=False).status_code == 303

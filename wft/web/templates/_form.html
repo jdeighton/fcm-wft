@@ -9,6 +9,15 @@
   {% if f.error %}<p class="field-error">{{ f.error }}</p>{% endif %}
   {% for c in f.children %}{{ field(c) }}{% endfor %}
 </fieldset>
+{% elif f.kind == "data" %}
+<div class="field data-field">
+  <span class="label">{{ f.label }}</span>
+  {% if f.value %}
+  <input type="hidden" name="{{ f.name }}.__json" value="{{ f.value | tojson | forceescape }}">
+  <dl class="data">{% for k, v in f.value.items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl>
+  {% else %}<p class="muted small">Not filled in yet.</p>{% endif %}
+  {% if f.help %}<p class="help">{{ f.help }}</p>{% endif %}
+</div>
 {% elif f.kind == "rows" %}
 <fieldset class="group rows{% if f.error %} has-error{% endif %}">
   <legend>{{ f.label }}{% if f.required %} <span class="req" aria-label="required">*</span>{% endif %}</legend>
@@ -52,6 +61,12 @@
   <input id="{{ fid }}" name="{{ f.name }}" type="text" inputmode="decimal" value="{{ f.value if f.value is not none else '' }}">
   {% elif f.kind == "date" %}
   <input id="{{ fid }}" name="{{ f.name }}" type="date" value="{{ f.value or '' }}">
+  {% elif f.picklist %}
+  <input id="{{ fid }}" name="{{ f.name }}" type="text" list="{{ fid }}-list" autocomplete="off"
+         value="{{ f.value if f.value is not none else '' }}">
+  <datalist id="{{ fid }}-list">{% for value, label in f.options %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</datalist>
+  {% if f.picklist_warning %}<p class="help warn">{{ f.picklist_warning }}</p>
+  {% elif f.options %}<p class="help">Suggestions from {{ f.picklist.split(".")[0] | upper }}; you can also type a value.</p>{% endif %}
   {% else %}
   <input id="{{ fid }}" name="{{ f.name }}" type="text" value="{{ f.value if f.value is not none else '' }}">
   {% endif %}
@@ -71,6 +86,8 @@
   <dd>{% for row in f.rows[:-1] %}<div class="row-item">{{ readonly(row) }}</div>{% else %}<span class="muted">None</span>{% endfor %}</dd>
   {% elif f.kind == "choices" %}
   <dt>{{ f.label }}</dt><dd>{{ f.value | join(", ") if f.value else "—" }}</dd>
+  {% elif f.kind == "data" %}
+  <dt>{{ f.label }}</dt><dd>{% if f.value %}{% for k, v in f.value.items() %}{{ k }}: {{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}—{% endif %}</dd>
   {% elif f.kind == "checkbox" %}
   <dt>{{ f.label }}</dt><dd>{{ "Yes" if f.value else "No" }}</dd>
   {% else %}

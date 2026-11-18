@@ -15,7 +15,8 @@ from wft.engine import CommandError
 from wft.events import Event
 from wft.services import STATUS_FILTERS, FileTooLarge, NotFound, ReadOnly, Services
 from wft.web import security
-from wft.web.forms import build_fields, parse_form
+from wft.web.forms import build_fields, parse_form, picklist_names
+from wft.adapters import AdapterUnavailable, NotFoundInSystem
 
 HERE = Path(__file__).parent
 
@@ -37,7 +38,8 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
         ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()],
                    is_admin=services.is_admin, my_task_count=len(services.tasks().mine),
-                   open_flag_count=sum(1 for o in services.open_flags() if o.flag.blocking))
+                   open_flag_count=sum(1 for o in services.open_flags() if o.flag.blocking),
+                   has_adapters=bool(services.adapters))
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
     def back_to(request_id: str) -> RedirectResponse:
@@ -116,8 +118,9 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         forms = {}
         for sd in capture:
             step_errors = {f"{sd.id}.{k}": v for k, v in (errors.get(sd.id) or {}).items()}
+            lists = {n: services.picklist(n) for n in picklist_names(sd.form_schema)}
             forms[sd.id] = build_fields(sd.form_schema or {}, values.get(sd.id, state.step(sd.id).data or {}),
-                                        step_errors, f"{sd.id}.")
+                                        step_errors, f"{sd.id}.", lists)
         titles = {s.id: s.title for s in defn.steps}
         return render(request, "amend.html", status_code, req=state, defn=defn, capture=capture, forms=forms,
                       impact=impact, step_titles=titles, form_errors=errors)
@@ -141,6 +144,27 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         except engine.FormInvalid as e:
             return amend_page(request, request_id, 422, values=data, errors={e.step_id: e.errors})
         return amend_page(request, request_id, values=data, impact=impact)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/verify/check")
+    def verify_check(request_id: str, step_id: str):
+        services.verify_check(request_id, step_id)
+        return RedirectResponse(f"/requests/{request_id}#step-{step_id}", status_code=303)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/verify/accept")
+    def verify_accept(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
+        services.accept_verification(request_id, step_id, notes)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/verify/manual")
+    def verify_manual(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
+        services.complete_verification_manually(request_id, step_id, notes)
+        return back_to(request_id)
+
+    @app.post("/picklists/refresh")
+    def refresh_picklists(request: Request):
+        names = [f"{system}.{op}" for system, a in services.adapters.items() for op in sorted(a.list_operations)]
+        services.refresh_picklists(names)
+        return RedirectResponse(_back(request, "/"), status_code=303)
 
     @app.post("/requests/{request_id}/hold")
     def hold(request_id: str, reason: Annotated[str, Form()] = ""):
@@ -192,10 +216,12 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         return back_to(services.create_request(workflow, title))
 
     def show(request: Request, request_id: str, status_code: int = 200,
-             values: dict[str, dict] | None = None, errors: dict[str, dict] | None = None) -> HTMLResponse:
+             values: dict[str, dict] | None = None, errors: dict[str, dict] | None = None,
+             message: str | None = None) -> HTMLResponse:
         """The request page. `values`/`errors` (per form step) re-display a form that failed validation."""
         state, defn = services.get(request_id)
         values, errors = values or {}, errors or {}
+        editable = {sd.id for sd in editable_forms(state, defn)}
         forms = {}
         for sd in defn.steps:
             if sd.type != "form":
@@ -203,10 +229,13 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
             st = state.step(sd.id)
             data = values.get(sd.id, st.draft if st.data is None else st.data)
             step_errors = {f"{sd.id}.{k}": v for k, v in (errors.get(sd.id) or {}).items()}
-            forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.")
+            lists = {n: services.picklist(n) for n in picklist_names(sd.form_schema)} if sd.id in editable else {}
+            forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.", lists)
+        verify = {sd.id: _verify_view(state, defn, sd.id) for sd in defn.steps if sd.type == "verify"}
         follow_ups = services.follow_ups(request_id)
         original = services.rm.get(state.follow_up_of) if state.follow_up_of else None
         return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
+                      verify=verify, message=message,
                       follow_ups=follow_ups, original=original,
                       editable=editable_forms(state, defn), form_errors=errors,
                       history=services.rm.history(request_id))
@@ -227,6 +256,16 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         if not steps:
             raise CommandError("There is no form to fill in on this request right now")
         data = {sd.id: parse_form(sd.form_schema or {}, form, f"{sd.id}.") for sd in steps}
+        if action == "prefill":
+            step_id = next((sd.id for sd in steps if sd.raw.get("prefill")), None)
+            if step_id is None:
+                raise CommandError("This form has nothing to fill from a trading system")
+            try:
+                services.prefill(request_id, step_id, data[step_id])
+            except (AdapterUnavailable, NotFoundInSystem) as e:
+                services.save_form(request_id, step_id, data[step_id])
+                return show(request, request_id, values=data, message=f"Couldn't fill from the trading system: {e}")
+            return back_to(request_id)
         try:
             if action == "submit" and state.status == engine.DRAFT:
                 services.submit(request_id, data)
@@ -303,6 +342,34 @@ def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
     return path if path in ("/", "/tasks", "/waiting", "/flags") or path.startswith("/requests/") else default
+
+
+def _verify_view(state, defn, step_id: str) -> dict:
+    """What a verify step will check, and its latest result, for the page."""
+    st = state.step(step_id)
+    try:
+        operation, key, expected = engine.verify_target(state, defn, step_id)
+    except Exception as e:  # a bad expression shouldn't break the page
+        operation, key, expected = defn.step(step_id).raw.get("adapter"), None, f"(can't work out: {e})"
+    data = st.data or {}
+    last = data.get("last_check")
+    differing = {d["field"] for d in (last or {}).get("differences") or ()}
+    rows = []
+    if last and isinstance(last.get("expected"), dict) and isinstance(last.get("actual"), dict):
+        rows = [(f, e, a, f in differing) for f, e, a in _flatten_pairs(last["expected"], last["actual"])]
+    elif last and last.get("actual") is not None:
+        rows = [("(value)", last.get("expected"), last.get("actual"), bool(differing))]
+    return {"operation": operation, "key": key, "expected": expected, "last": last, "rows": rows,
+            "result": data.get("result"), "notes": data.get("notes")}
+
+
+def _flatten_pairs(expected: dict, actual: dict, prefix: str = ""):
+    for k, v in expected.items():
+        a = actual.get(k) if isinstance(actual, dict) else None
+        if isinstance(v, dict):
+            yield from _flatten_pairs(v, a if isinstance(a, dict) else {}, f"{prefix}{k}.")
+        else:
+            yield f"{prefix}{k}", v, a
 
 
 def editable_forms(state, defn) -> list:

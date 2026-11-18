@@ -82,5 +82,11 @@
     <span>Local cache out of step? Rebuild it from the shared drive.</span>
     <button type="submit" class="secondary">Rebuild cache</button>
   </form>
+  {% if has_adapters %}
+  <form method="post" action="/picklists/refresh" class="row">
+    <span>Accounts and users lists from TT are kept for a while. Fetch them again now:</span>
+    <button type="submit" class="secondary">Refresh TT lists</button>
+  </form>
+  {% endif %}
 </section>
 {% endblock %}

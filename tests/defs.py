@@ -102,3 +102,23 @@ AMENDABLE = {
 }
 AMENDABLE_FILES = {"schemas/amend.schema.json": AMEND_SCHEMA,
                    "samples/amendable.yaml": {"capture": {"account": "ACC1", "limits": {"max": 10}}}}
+
+
+TT_CAPTURE = {"type": "object", "required": ["account", "limits"], "properties": {
+    "account": {"type": "string", "x-picklist": "tt.accounts"},
+    "current": {"type": "object"},
+    "limits": {"type": "object", "required": ["max"], "properties": {
+        "max": {"type": "number"}, "currency": {"type": "string"}}},
+}}
+TT_FLOW = {
+    "id": "tt_limits", "version": 1, "title": "TT limits", "inputs_schema": "tt_capture.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "tt_capture.schema.json",
+         "prefill": {"operation": "tt.account_limits", "key": "account", "target": "current"}},
+        {"id": "apply", "type": "manual", "depends_on": ["capture"], "checklist": ["Apply in TT"]},
+        {"id": "check", "type": "verify", "title": "Verify in TT", "depends_on": ["apply"],
+         "adapter": "tt.account_limits", "key": "{{ inputs.account }}", "expected": "{{ inputs.limits }}"},
+    ],
+}
+TT_FILES = {"schemas/tt_capture.schema.json": TT_CAPTURE,
+            "samples/tt_limits.yaml": {"capture": {"account": "ACC1", "limits": {"max": 1000}}}}
