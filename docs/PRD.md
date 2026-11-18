@@ -429,8 +429,11 @@ Sub-workflow syntax (supported by engine in R1, used in later releases):
 
 Rules:
 - Requests are pinned to the definition `id` + `version` they started on.
-- Definitions reference schemas, checklists (Markdown) and mappings by relative path within the published definitions bundle.
-- Expressions are a restricted templating subset (no arbitrary code).
+- Definitions reference schemas, checklists (Markdown) and mappings by relative path: schema refs under `schemas/`, checklist refs under `checklists/`, mapping refs under `mappings/`. A checklist may be an inline list or a Markdown file of `- item` lines.
+- A workflow with an `inputs_schema` needs sample inputs at `samples/<id>.yaml` for the validator's dry run.
+- Expressions are a restricted templating subset (no arbitrary code): `{{ path | filter }}` with paths rooted at `inputs`, `steps`, `item`, `request`, the filters `default`, `join`, `upper`, `lower`, `length`, and `==` / `!=` comparisons.
+- The format is defined by `wft/schemas/workflow.schema.json`.
+- Each version is published to the share as its own immutable folder, `definitions/workflows/<id>/<version>/`, containing the workflow, only the files it references, and a `manifest.json` (file hashes, publisher, git commit). Instances load every published version and pick up new ones while running.
 
 ## 9. Maintenance & change process
 
@@ -440,7 +443,8 @@ Rules:
 wft/                     # application package
   engine/  repository/  web/  adapters/tt/  adapters/krm22/
 definitions/
-  workflows/             # *.yaml
+  workflows/             # <id>.yaml, the current version of each workflow
+  samples/               # <id>.yaml sample inputs for the dry run
   schemas/tt/            # JSON Schemas
   checklists/tt/         # Markdown
   mappings/krm22/        # CSV mappings

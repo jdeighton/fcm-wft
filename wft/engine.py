@@ -6,7 +6,7 @@ persist events; the engine only decides what may happen and folds events into st
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from wft.definitions import WorkflowDef
 from wft.events import Event
@@ -14,6 +14,9 @@ from wft.events import Event
 REQUEST_CREATED = "request_created"
 CHECKLIST_ITEM_SET = "checklist_item_set"
 STEP_COMPLETED = "step_completed"
+
+# Step types this version of the engine can run. Definitions using others fail validation.
+SUPPORTED_STEP_TYPES = frozenset({"manual"})
 
 ACTIVE = "Active"
 COMPLETED = "Completed"
@@ -94,6 +97,30 @@ def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEv
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
     return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
+
+
+Command = Callable[[RequestState], NewEvent]
+
+
+def actions(state: RequestState, defn: WorkflowDef) -> list[tuple[str, list[Command]]]:
+    """The distinct things a user could do next, each as the commands that do it.
+
+    Used by the validator's dry run to walk every path through a workflow.
+    """
+    if state.status != ACTIVE:
+        return []
+    out: list[tuple[str, list[Command]]] = []
+    for step in state.steps:
+        if step.status != READY:
+            continue
+        sd = defn.step(step.id)
+        if sd.type == "manual":
+            ticks: list[Command] = [
+                (lambda s, sid=step.id, i=i: set_checklist_item(s, defn, sid, i, True))
+                for i in range(len(sd.checklist)) if i not in step.ticked
+            ]
+            out.append((f"complete {step.id}", ticks + [lambda s, sid=step.id: complete_step(s, defn, sid)]))
+    return out
 
 
 def _ready_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:

@@ -5,6 +5,7 @@ Deleting the cache file is always safe; the next start re-ingests every journal.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -14,6 +15,8 @@ from wft import engine
 from wft.definitions import DefinitionRegistry
 from wft.engine import RequestState, StepState
 from wft.events import Event
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -75,7 +78,10 @@ class ReadModel:
                     (e.event_id, e.request_id, e.seq, e.ts, e.to_line()))
                 if cur.rowcount:
                     touched.add(e.request_id)
-            for request_id in touched:
+            # Requests whose definition wasn't loaded yet when their events arrived get another try.
+            unprojected = {r[0] for r in self._db.execute(
+                "SELECT DISTINCT request_id FROM events WHERE request_id NOT IN (SELECT request_id FROM requests)")}
+            for request_id in touched | unprojected:
                 self._project(request_id)
             if cursor is not None:
                 self._db.executemany("INSERT OR REPLACE INTO journal_cursor VALUES (?, ?)", cursor.items())
@@ -84,7 +90,12 @@ class ReadModel:
     def _project(self, request_id: str) -> None:
         events = [Event.from_line(r[0]) for r in self._db.execute(
             "SELECT line FROM events WHERE request_id = ?", (request_id,))]
-        defn = self.registry.get(events[0].definition)
+        created = next((e for e in events if e.seq == 1), events[0])
+        try:
+            defn = self.registry.get(created.definition)
+        except KeyError:
+            log.warning("Request %s uses definition %s, which isn't loaded yet", request_id, created.definition)
+            return
         result = engine.replay(events, defn)
         state = result.state
         self._db.execute(

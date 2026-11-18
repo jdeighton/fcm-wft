@@ -13,7 +13,7 @@ DEMO = "demo_manual@1"
 
 @pytest.fixture
 def registry() -> DefinitionRegistry:
-    return DefinitionRegistry.load(REPO_ROOT / "definitions")
+    return DefinitionRegistry.from_repo(REPO_ROOT / "definitions")
 
 
 @pytest.fixture

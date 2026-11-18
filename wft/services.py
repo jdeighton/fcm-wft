@@ -55,6 +55,9 @@ class Services:
     def sync(self) -> bool:
         """Read anything new from the share into the read model. Returns False if the share is unavailable."""
         try:
+            added = self.registry.refresh()
+            if added:
+                log.info("Loaded workflow definition(s): %s", ", ".join(added))
             events, cursor = self.repo.read_since(self.rm.cursor())
         except OSError as e:
             self._go_read_only(e)
@@ -128,6 +131,9 @@ class Services:
             defn = self.registry.get(workflow_key)
         except KeyError:
             raise CommandError(f"Unknown workflow {workflow_key!r}") from None
+        if not defn.runnable_by(__version__):
+            raise CommandError(f"{defn.title} (version {defn.version}) needs WFT {defn.min_app_version} or later; "
+                               f"this is {__version__}. Run wft-update to upgrade.")
         request_id = new_id()
         with self._lock:
             self._record(request_id, defn, engine.create_request(defn, title))

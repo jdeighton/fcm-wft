@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from wft import engine
+from wft import __version__, engine
 from wft.engine import CommandError
 from wft.events import Event
 from wft.services import NotFound, ReadOnly, Services
@@ -62,8 +62,8 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
 
     @app.get("/")
     def index(request: Request):
-        return render(request, "index.html",
-                      requests=services.rm.list_requests(), workflows=services.registry.latest())
+        workflows = [(w, w.runnable_by(__version__)) for w in services.registry.latest()]
+        return render(request, "index.html", requests=services.rm.list_requests(), workflows=workflows)
 
     @app.post("/requests")
     def create(workflow: Annotated[str, Form()], title: Annotated[str, Form()]):
