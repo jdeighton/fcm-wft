@@ -35,7 +35,21 @@ CREATE TABLE IF NOT EXISTS requests (
     current_step TEXT,
     state_json   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conflicts (
+    event_id   TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    line       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS conflicts_by_actor ON conflicts (actor);
+CREATE TABLE IF NOT EXISTS journal_cursor (
+    journal TEXT PRIMARY KEY,
+    offset  INTEGER NOT NULL
+);
 """
+TABLES = ("events", "requests", "conflicts", "journal_cursor")
+# Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
+CACHE_VERSION = 2
 
 
 class ReadModel:
@@ -43,12 +57,16 @@ class ReadModel:
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(path), check_same_thread=False)
+        if self._db.execute("PRAGMA user_version").fetchone()[0] != CACHE_VERSION:
+            for table in TABLES:
+                self._db.execute(f"DROP TABLE IF EXISTS {table}")
+            self._db.execute(f"PRAGMA user_version = {CACHE_VERSION}")
         self._db.executescript(SCHEMA)
         self._lock = threading.Lock()
         self.registry = registry
 
-    def ingest(self, events: Iterable[Event]) -> set[str]:
-        """Store events not seen before and re-project the requests they touch."""
+    def ingest(self, events: Iterable[Event], cursor: dict[str, int] | None = None) -> set[str]:
+        """Store events not seen before, re-project the requests they touch, and save the read cursor."""
         with self._lock, self._db:
             touched = set()
             for e in events:
@@ -59,17 +77,39 @@ class ReadModel:
                     touched.add(e.request_id)
             for request_id in touched:
                 self._project(request_id)
+            if cursor is not None:
+                self._db.executemany("INSERT OR REPLACE INTO journal_cursor VALUES (?, ?)", cursor.items())
             return touched
 
     def _project(self, request_id: str) -> None:
         events = [Event.from_line(r[0]) for r in self._db.execute(
-            "SELECT line FROM events WHERE request_id = ? ORDER BY seq, ts, event_id", (request_id,))]
+            "SELECT line FROM events WHERE request_id = ?", (request_id,))]
         defn = self.registry.get(events[0].definition)
-        state = engine.replay(events, defn)
+        result = engine.replay(events, defn)
+        state = result.state
         self._db.execute(
             "INSERT OR REPLACE INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
             (state.request_id, state.workflow, state.title, state.status, state.created_by,
              state.created_at, state.updated_at, state.current_step, _dump_state(state)))
+        self._db.execute("DELETE FROM conflicts WHERE request_id = ?", (request_id,))
+        self._db.executemany(
+            "INSERT INTO conflicts VALUES (?,?,?,?)",
+            [(e.event_id, e.request_id, e.actor, e.to_line()) for e in result.losers])
+
+    def cursor(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._db.execute("SELECT journal, offset FROM journal_cursor").fetchall())
+
+    def version(self) -> int:
+        """Changes whenever new events are ingested; lets the UI notice updates cheaply."""
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    def reset(self) -> None:
+        """Empty the cache so the next sync re-reads every journal from the start."""
+        with self._lock, self._db:
+            for table in TABLES:
+                self._db.execute(f"DELETE FROM {table}")
 
     def get(self, request_id: str) -> RequestState | None:
         with self._lock:
@@ -85,10 +125,17 @@ class ReadModel:
         return [_load_state(r[0]) for r in rows]
 
     def history(self, request_id: str) -> list[Event]:
+        """The winning chain of events for a request, in order."""
         with self._lock:
-            rows = self._db.execute(
-                "SELECT line FROM events WHERE request_id = ? ORDER BY seq, ts, event_id", (request_id,)).fetchall()
-        return [Event.from_line(r[0]) for r in rows]
+            rows = self._db.execute("SELECT line FROM events WHERE request_id = ?", (request_id,)).fetchall()
+        chain, _ = engine.resolve(Event.from_line(r[0]) for r in rows)
+        return chain
+
+    def conflicts_for(self, actor: str) -> list[Event]:
+        """Actions by `actor` that were overridden by someone else's concurrent action."""
+        with self._lock:
+            rows = self._db.execute("SELECT line FROM conflicts WHERE actor = ?", (actor,)).fetchall()
+        return sorted((Event.from_line(r[0]) for r in rows), key=lambda e: e.ts)
 
     def dump(self) -> list[tuple]:
         """All projected rows, for comparing a rebuilt cache with the original."""

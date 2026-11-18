@@ -33,6 +33,7 @@ class NewEvent:
     type: str
     seq: int
     payload: dict[str, Any] = field(default_factory=dict)
+    prev: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class RequestState:
     created_at: str
     updated_at: str
     seq: int
+    last_event: str
     steps: tuple[StepState, ...]
 
     def step(self, step_id: str) -> StepState:
@@ -82,7 +84,7 @@ def set_checklist_item(state: RequestState, defn: WorkflowDef, step_id: str, ind
         raise CommandError(f"Step {step_id!r} has no checklist item {index}")
     if (index in step.ticked) == checked:
         raise CommandError("Checklist item is already in that state")
-    return NewEvent(CHECKLIST_ITEM_SET, seq=state.seq + 1,
+    return NewEvent(CHECKLIST_ITEM_SET, seq=state.seq + 1, prev=state.last_event,
                     payload={"step": step_id, "index": index, "checked": checked})
 
 
@@ -91,7 +93,7 @@ def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEv
     missing = len(defn.step(step_id).checklist) - len(step.ticked)
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
-    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, payload={"step": step_id})
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
 
 
 def _ready_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
@@ -116,13 +118,13 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         state = RequestState(
             request_id=event.request_id, workflow=defn.key, title=event.payload["title"],
             status=ACTIVE, created_by=event.actor, created_at=event.ts, updated_at=event.ts,
-            seq=event.seq, steps=steps,
+            seq=event.seq, last_event=event.event_id, steps=steps,
         )
         return _advance(state, defn)
 
     if state is None:
         raise ValueError(f"{event.request_id}: {event.type} before {REQUEST_CREATED}")
-    state = replace(state, seq=event.seq, updated_at=event.ts)
+    state = replace(state, seq=event.seq, last_event=event.event_id, updated_at=event.ts)
 
     if event.type == CHECKLIST_ITEM_SET:
         step = state.step(event.payload["step"])
@@ -154,27 +156,53 @@ def _advance(state: RequestState, defn: WorkflowDef) -> RequestState:
     return replace(state, steps=steps, status=status)
 
 
-def order_events(events: Iterable[Event]) -> list[Event]:
-    """Order one request's events by sequence.
+@dataclass(frozen=True)
+class Replay:
+    state: RequestState
+    losers: tuple[Event, ...]  # events overridden by a concurrent action, oldest first
 
-    If two events claim the same sequence (two users acted at once), the one
-    with the earliest timestamp, then lowest event id, wins and the other is
-    dropped. Surfacing the losing action to its author is ticket #3.
+
+def resolve(events: Iterable[Event]) -> tuple[list[Event], list[Event]]:
+    """Split one request's events into the winning chain and the losers.
+
+    Order is by per-request sequence, never wall-clock. When two users act at
+    once, both events claim the same sequence; the one with the earliest
+    timestamp (then lowest event id) wins. Any event decided on top of a loser
+    (its `prev` is a loser) also loses. Events after a gap in the sequence are
+    neither: they wait until their predecessor has been read.
     """
-    by_seq: dict[int, Event] = {}
+    by_seq: dict[int, list[Event]] = {}
     for e in events:
-        cur = by_seq.get(e.seq)
-        if cur is None or (e.ts, e.event_id) < (cur.ts, cur.event_id):
-            by_seq[e.seq] = e
-    return [by_seq[k] for k in sorted(by_seq)]
+        by_seq.setdefault(e.seq, []).append(e)
+
+    chain: list[Event] = []
+    losers: list[Event] = []
+    lost: set[str] = set()
+    stalled = False
+    for seq in sorted(by_seq):
+        candidates = sorted(by_seq[seq], key=lambda e: (e.ts, e.event_id))
+        winner = None
+        if not stalled and seq == len(chain) + 1:
+            head = chain[-1].event_id if chain else None
+            # prev=None on a later event only occurs in journals written before prev existed.
+            winner = next((e for e in candidates
+                           if e.prev not in lost and (e.prev == head or e.prev is None)), None)
+        if winner is None:
+            stalled = True
+        else:
+            chain.append(winner)
+        for e in candidates:
+            if e is not winner and (winner is not None or e.prev in lost):
+                lost.add(e.event_id)
+                losers.append(e)
+    return chain, losers
 
 
-def replay(events: Iterable[Event], defn: WorkflowDef) -> RequestState:
+def replay(events: Iterable[Event], defn: WorkflowDef) -> Replay:
+    chain, losers = resolve(events)
     state: RequestState | None = None
-    for e in order_events(events):
-        if state is not None and e.seq != state.seq + 1:
-            break  # gap: a later event arrived before its predecessor; wait for it
+    for e in chain:
         state = apply(state, e, defn)
     if state is None:
         raise ValueError("No events to replay")
-    return state
+    return Replay(state, tuple(losers))

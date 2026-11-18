@@ -29,3 +29,12 @@ body.env-uat { --uat-tint:#fff1e0; border-left:6px solid var(--warn); border-rig
 @media (prefers-color-scheme: dark) { body.env-uat { --uat-tint:#3a2614; } }
 body.env-uat header { background:var(--uat-tint); }
 .error p { margin:4px 0; }
+.notice { margin:0; padding:8px 16px; border-bottom:1px solid var(--line); background:var(--card); }
+.notice-warn { background:#fef0c7; color:#7a2e0e; }
+.notice-conflict { background:#fee4e2; color:#7a271a; }
+@media (prefers-color-scheme: dark) { .notice-warn { background:#4e1d09; color:#fedf89; } .notice-conflict { background:#55160c; color:#fecdca; } }
+.notice form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.notice button { padding:2px 10px; }
+button.secondary { background:var(--card); color:var(--fg); border-color:var(--line); }
+.small { font-size:.85rem; }
+body.read-only main form button { opacity:.5; pointer-events:none; }

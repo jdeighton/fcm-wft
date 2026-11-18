@@ -44,3 +44,15 @@ def two_step() -> DefinitionRegistry:
             {"id": "b", "type": "manual", "depends_on": ["a"]},
         ],
     })])
+
+
+@pytest.fixture(autouse=True)
+def ticking_clock(monkeypatch):
+    """Strictly increasing timestamps, so 'who acted first' in tests never depends on the millisecond."""
+    from datetime import datetime, timedelta, timezone
+
+    import wft.services
+    start = datetime(2026, 11, 18, 9, 0, tzinfo=timezone.utc)
+    counter = iter(range(10**9))
+    monkeypatch.setattr(wft.services, "utc_now",
+                        lambda: (start + timedelta(milliseconds=next(counter))).isoformat(timespec="milliseconds"))

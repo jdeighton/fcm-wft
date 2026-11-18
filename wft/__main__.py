@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import socket
 import sys
 import threading
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", choices=ENVIRONMENTS, default="prod")
     parser.add_argument("--no-browser", action="store_true", help="don't open a browser window")
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     try:
         config = load_config(args.env)
@@ -65,8 +67,10 @@ def main(argv: list[str] | None = None) -> int:
 
         registry = DefinitionRegistry.load(config.definitions_dir)
         read_model = ReadModel(config.cache_path, registry)
-        services = Services(FileRepository(config.share_root, user), read_model, registry, user, host)
+        services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
+                            acknowledged_path=config.home / "acknowledged-conflicts.json")
         services.sync()
+        services.start_polling()
         app = create_app(services, config.env, token, port)
 
         url = f"http://{HOST}:{port}{security.AUTH_PATH}?token={token}"
@@ -75,7 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"WFT ({config.env}) running as {user}. Open: {url}\nPress Ctrl+C to stop.")
         if not args.no_browser:
             threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-        uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+        try:
+            uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+        finally:
+            services.stop_polling()
     finally:
         lock.release()
     return 0

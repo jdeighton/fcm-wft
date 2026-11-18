@@ -36,4 +36,11 @@
   <p class="muted">No requests yet.</p>
   {% endif %}
 </section>
+
+<section class="card muted small">
+  <form method="post" action="/cache/rebuild" class="row">
+    <span>Local cache out of step? Rebuild it from the shared drive.</span>
+    <button type="submit" class="secondary">Rebuild cache</button>
+  </form>
+</section>
 {% endblock %}
