@@ -5,7 +5,8 @@ import pytest
 from wft.config import REPO_ROOT
 from wft.definitions import DefinitionRegistry, parse_workflow
 from wft.readmodel import ReadModel
-from wft.repository import FileRepository, ReferenceAllocator
+from wft.engine import MAX_ATTACHMENT_BYTES
+from wft.repository import AttachmentStore, FileRepository, ReferenceAllocator
 from wft.services import Services
 
 DEMO = "demo_manual@1"
@@ -26,7 +27,8 @@ def share(tmp_path) -> Path:
 def make_services(share: Path, cache: Path, registry, user: str = "alice") -> Services:
     rm = ReadModel(cache, registry)
     svc = Services(FileRepository(share, user), rm, registry, user, "host-" + user,
-                   references=ReferenceAllocator(share))
+                   references=ReferenceAllocator(share),
+                   attachments=AttachmentStore(share, MAX_ATTACHMENT_BYTES))
     svc.sync()
     return svc
 

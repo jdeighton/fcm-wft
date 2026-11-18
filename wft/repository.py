@@ -9,15 +9,18 @@ All storage access goes through `Repository` so the backend can be swapped later
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import BinaryIO, Iterator, Protocol
 
 from wft.events import Event, utc_now
 
@@ -274,3 +277,83 @@ class ReferenceAllocator:
             raise ReferenceUnavailable(f"Can't update reference counter {counter}: {e}") from e
         finally:
             lock.unlink(missing_ok=True)
+
+
+class AttachmentTooLarge(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class StoredFile:
+    path: str   # relative to the share root, with forward slashes
+    size: int
+    sha256: str
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_filename(name: str, limit: int = 80) -> str:
+    """A name that's safe on any file system; keeps the extension. The original name is kept in the journal."""
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    stem = _UNSAFE.sub("_", stem).strip("._") or "file"
+    ext = _UNSAFE.sub("", ext)[:10]
+    return f"{stem[: limit - len(ext) - 1]}.{ext}" if ext else stem[:limit]
+
+
+class AttachmentStore:
+    """Write-once file storage under `attachments/<request id>/` on the share.
+
+    Uploads are streamed to a temporary file in the target folder (hashing as
+    they go), then renamed into place. Stored files are never overwritten: the
+    name includes a hash prefix, so the same name means the same content.
+    """
+
+    CHUNK = 1024 * 1024
+
+    def __init__(self, share_root: Path, max_bytes: int):
+        self.root = share_root
+        self.max_bytes = max_bytes
+
+    def put(self, request_id: str, name: str, stream: BinaryIO) -> StoredFile:
+        if not self.root.is_dir():
+            raise ShareUnavailable(f"Share not reachable: {self.root}")
+        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            raise ValueError("Invalid request id")
+        folder = self.root / "attachments" / request_id
+        folder.mkdir(parents=True, exist_ok=True)
+        tmp = folder / f".upload-{os.getpid()}-{time.monotonic_ns()}.tmp"
+        digest, size = hashlib.sha256(), 0
+        try:
+            with open(tmp, "wb") as out:
+                while chunk := stream.read(self.CHUNK):
+                    size += len(chunk)
+                    if size > self.max_bytes:
+                        raise AttachmentTooLarge(
+                            f"{name} is larger than the {self.max_bytes // (1024 * 1024)} MB limit")
+                    digest.update(chunk)
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+            sha = digest.hexdigest()
+            final = folder / f"{sha[:16]}_{safe_filename(name)}"
+            if final.exists():
+                tmp.unlink()  # identical content already stored
+            else:
+                os.rename(tmp, final)
+            return StoredFile(final.relative_to(self.root).as_posix(), size, sha)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def open_path(self, relative: str) -> Path:
+        """The stored file for a journal-recorded path, refusing anything outside the attachments folder."""
+        base = (self.root / "attachments").resolve()
+        path = (self.root / relative).resolve()
+        if base not in path.parents:
+            raise ValueError("Attachment path outside the attachments folder")
+        if not path.is_file():
+            raise FileNotFoundError(relative)
+        return path

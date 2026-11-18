@@ -30,7 +30,8 @@ REFERENCE_ASSIGNED = "reference_assigned"
 NOTE_ADDED = "note_added"
 OWNER_CHANGED = "owner_changed"
 STEP_ASSIGNMENT = "step_assignment"  # payload: step, mode (claim | assign | release), assignee
-ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASSIGNMENT})
+ATTACHMENT_ADDED = "attachment_added"  # payload: name, size, sha256, path, step
+ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASSIGNMENT, ATTACHMENT_ADDED})
 ANNOTATION_SEQ = 0
 
 # Step types this version of the engine can run. Definitions using others fail validation.
@@ -59,6 +60,7 @@ WAIT_REASONS = {
 }
 
 MAX_NOTE_LENGTH = 4000
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 class CommandError(Exception):
@@ -127,6 +129,17 @@ class Note:
 
 
 @dataclass(frozen=True)
+class Attachment:
+    ts: str
+    actor: str
+    name: str        # original file name, for display and download
+    size: int
+    sha256: str
+    path: str        # relative to the share root
+    step: str | None = None
+
+
+@dataclass(frozen=True)
 class RequestState:
     request_id: str
     workflow: str  # "<id>@<version>"
@@ -145,6 +158,13 @@ class RequestState:
     notes: tuple[Note, ...] = ()
     owner: str = ""  # accountable person; the creator unless reassigned
     completed_at: str | None = None
+    attachments: tuple[Attachment, ...] = ()
+
+    def attachment(self, sha256: str) -> Attachment:
+        for a in self.attachments:
+            if a.sha256 == sha256:
+                return a
+        raise KeyError(sha256)
 
     def step(self, step_id: str) -> StepState:
         for s in self.steps:
@@ -337,6 +357,28 @@ def release_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEve
                     payload={"step": step_id, "mode": "release", "assignee": None, "previous": step.assignee})
 
 
+def check_step_exists(defn: WorkflowDef, step_id: str | None) -> None:
+    if step_id:
+        try:
+            defn.step(step_id)
+        except KeyError:
+            raise CommandError(f"Unknown step {step_id!r}") from None
+
+
+def add_attachment(state: RequestState, defn: WorkflowDef, name: str, size: int, sha256: str, path: str,
+                   step_id: str | None = None) -> NewEvent:
+    """Record a file already stored on the share. Allowed at any stage, so evidence can be added afterwards."""
+    if not name.strip():
+        raise CommandError("The file needs a name")
+    if size > MAX_ATTACHMENT_BYTES:
+        raise CommandError(f"Files are limited to {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB")
+    check_step_exists(defn, step_id)
+    if any(a.sha256 == sha256 and a.name == name for a in state.attachments):
+        raise CommandError(f"{name} is already attached")
+    return NewEvent(ATTACHMENT_ADDED, seq=ANNOTATION_SEQ, payload={
+        "name": name, "size": size, "sha256": sha256, "path": path, "step": step_id or None})
+
+
 def add_note(state: RequestState, text: str) -> NewEvent:
     text = text.strip()
     if not text:
@@ -489,6 +531,10 @@ def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
         return replace(state, reference=event.payload["reference"]), True
     if event.type == NOTE_ADDED:
         return replace(state, notes=state.notes + (Note(event.ts, event.actor, event.payload["text"]),)), True
+    if event.type == ATTACHMENT_ADDED:
+        p = event.payload
+        return replace(state, attachments=state.attachments + (
+            Attachment(event.ts, event.actor, p["name"], p["size"], p["sha256"], p["path"], p.get("step")),)), True
     if event.type == OWNER_CHANGED:
         return replace(state, owner=event.payload["owner"]), True  # the latest change wins
     if event.type == STEP_ASSIGNMENT:

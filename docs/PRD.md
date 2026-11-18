@@ -247,7 +247,7 @@ Later: cycle-time analytics per workflow/step, off-process by reason, ETA.
 ### 6.13 Attachments
 
 - **FR-13.1** Any file type, max **25 MB** per file.
-- **FR-13.2** Stored on the share under the request folder, write-once. Journal records file name, size, SHA-256, uploader and timestamp.
+- **FR-13.2** Stored on the share under the request folder, write-once. Journal records file name, size, SHA-256, uploader and timestamp. Attachments can be added at any stage (including after completion) and optionally linked to a step; they are annotations, so they never conflict with other actions. The stored name is shortened and made file-system safe to keep UNC paths under Windows' limits; downloads use the original name.
 
 ### 6.14 Administration
 
@@ -300,7 +300,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
   definitions\<version>\           # published workflow definitions, schemas, config
   journals\YYYY-MM\<username>.jsonl
   archive\YYYY\...                 # journals older than 12 months
-  attachments\<request-id>\<sha256>_<filename>
+  attachments\<request-id>\<first 16 hex of sha256>_<safe filename>   # write-once; full hash in the journal
   locks\                           # short-lived lock files (reference allocation)
   meta\references\<PREFIX>-<YYYY>.txt  # last readable reference number issued
   instance-locks\<username>.lock   # one running instance per user

@@ -261,3 +261,32 @@ def test_request_list_filters_and_sort_links(services):
     assert page.index("Zulu") < page.index("Alpha")
     assert "No requests match" in client.get("/?q=nothing-like-this").text
     assert ">Age" in page and "In step" in page and "pill-ready" in page
+
+
+def test_upload_and_download_attachments(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "x")
+    page = client.get(f"/requests/{rid}").text
+    assert 'enctype="multipart/form-data"' in page and "No files attached" in page
+    r = client.post(f"/requests/{rid}/attachments", files={"file": ("Client email.msg", b"hello", "application/vnd.ms-outlook")},
+                    data={"step": "do_the_thing"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].endswith("#attachments")
+    page = client.get(f"/requests/{rid}").text
+    assert "Client email.msg" in page and "5 bytes" in page and "attachment added" in page
+    sha = services.get(rid)[0].attachments[0].sha256
+    dl = client.get(f"/requests/{rid}/attachments/{sha}")
+    assert dl.status_code == 200 and dl.content == b"hello"
+    assert "attachment" in dl.headers["content-disposition"] and "Client%20email.msg" in dl.headers["content-disposition"]
+    assert client.get(f"/requests/{rid}/attachments/{'0' * 64}").status_code == 404
+    assert client.post(f"/requests/{rid}/attachments", data={"step": ""}).status_code == 409
+
+
+def test_oversized_upload_is_refused_up_front(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "x")
+    r = client.post(f"/requests/{rid}/attachments", content=b"x",
+                    headers={"Content-Length": str(40 * 1024 * 1024), "Content-Type": "multipart/form-data; boundary=x"})
+    assert r.status_code == 413 and "limit is 25 MB" in r.text
+    services.attachments.max_bytes = 4
+    r = client.post(f"/requests/{rid}/attachments", files={"file": ("big.bin", b"12345")})
+    assert r.status_code == 413 and "larger than the 0 MB limit" in r.text
