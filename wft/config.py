@@ -13,7 +13,8 @@ from wft.adapters.tt import TTSettings
 
 ENVIRONMENTS = ("prod", "uat")
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENVIRONMENT_RULES = REPO_ROOT / "config" / "environments.yaml"
+ENVIRONMENT_RULES = REPO_ROOT / "config" / "environments.yaml"  # generic defaults, committed (public)
+LOCAL_RULES_NAME = "environments.yaml"  # firm-specific patterns, next to the user's .env files (never committed)
 ENV_MARKER = Path("meta") / "environment"
 # Every key an env file may contain; keep `.env.example` in step.
 SUPPORTED_KEYS = ("WFT_SHARE_ROOT", "WFT_PORT", "WFT_DEFINITIONS_DIR",
@@ -90,8 +91,68 @@ def check_environment(env: str, values: dict[str, str], rules: dict[str, dict[st
         raise ConfigError(f"The {env} env file mixes environments:\n  " + "\n  ".join(problems))
 
 
-def load_rules(path: Path = ENVIRONMENT_RULES) -> dict[str, dict[str, list[str]]]:
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+Rules = dict[str, dict[str, list[str]]]
+
+
+def rules_errors(data) -> list[str]:
+    """Problems with a rules file: it must map environment -> env-file key -> list of regex patterns."""
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        return ["must map each environment (prod, uat) to its settings"]
+    errors = []
+    for env, keys in data.items():
+        if env not in ENVIRONMENTS:
+            errors.append(f"unknown environment {env!r} (expected {', '.join(ENVIRONMENTS)})")
+            continue
+        if not isinstance(keys, dict):
+            errors.append(f"{env}: must map env-file keys to lists of patterns")
+            continue
+        for key, patterns in keys.items():
+            if key not in SUPPORTED_KEYS:
+                errors.append(f"{env}: unknown env-file key {key!r}")
+            if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+                errors.append(f"{env}.{key}: must be a list of patterns (text)")
+                continue
+            for pattern in patterns:
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    errors.append(f"{env}.{key}: pattern {pattern!r} isn't a valid regex ({e})")
+    return errors
+
+
+def _read_rules(path: Path) -> Rules:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path} isn't valid YAML: {e}") from None
+    errors = rules_errors(data)
+    if errors:
+        raise ConfigError(f"{path} has problems:\n  " + "\n  ".join(errors))
+    return data or {}
+
+
+def load_rules(path: Path = ENVIRONMENT_RULES) -> Rules:
+    """The generic rules committed in the repo."""
+    return _read_rules(path)
+
+
+def merge_rules(base: Rules, local: Rules) -> Rules:
+    """Local rules override the defaults per environment and per key; everything else keeps the defaults."""
+    merged = {env: dict(keys) for env, keys in base.items()}
+    for env, keys in local.items():
+        merged.setdefault(env, {}).update(keys)
+    return merged
+
+
+def effective_rules(home: Path) -> Rules:
+    """Repo defaults, with the firm-specific rules from `<home>/environments.yaml` merged over them if present."""
+    rules = load_rules()
+    local = home / LOCAL_RULES_NAME
+    if local.is_file():
+        rules = merge_rules(rules, _read_rules(local))
+    return rules
 
 
 def check_share_marker(config: Config) -> None:
@@ -117,7 +178,7 @@ def load_config(env: str, home: Path | None = None,
     unknown = sorted(set(values) - set(SUPPORTED_KEYS))
     if unknown:
         raise ConfigError(f"Unknown key(s) in {env_file}: {', '.join(unknown)}")
-    check_environment(env, values, load_rules() if rules is None else rules)
+    check_environment(env, values, effective_rules(home) if rules is None else rules)
 
     share_root = values.get("WFT_SHARE_ROOT")
     if not share_root:

@@ -37,7 +37,7 @@ database is needed. See the [PRD](docs/PRD.md) for the full design.
 | What | Where | Why |
 |---|---|---|
 | **Team and admins** | `definitions/config/roles.yaml` | See above: until it's published with an admin, publishing is open to anyone. |
-| Real share paths (and later TT URLs) | `config/environments.yaml` | The committed patterns are placeholders (`\prod\` / `\uat\` path segments). They stop a UAT profile pointing at production. |
+| Firm-specific environment checks | `environments.yaml` next to each user's `.env` files (**not** in the repo) | The repo's `config/environments.yaml` is public and only has generic patterns. Put patterns for the real share paths, TT URL and (later) KRM22 URL in a local `environments.yaml` (same format) in `%USERPROFILE%\.wft\`, and hand it out with the `.env` files. It stops a UAT profile pointing at production. |
 | Environment marker on each share | `<share>\meta\environment` | A file containing `prod` or `uat`. WFT refuses to start if it doesn't match `--env`. |
 | Per-user env files | `%USERPROFILE%\.wft\prod.env`, `uat.env` | Copy from [`.env.example`](.env.example). Never commit real env files. |
 | Published definitions | `python scripts/publish_definitions.py --env prod` | WFT only runs published workflows. Publishing to prod requires `definitions/` to be committed. |
@@ -53,7 +53,7 @@ python -m venv .venv
 python -m pytest
 ```
 
-1. Create a UAT share folder whose path matches `config/environments.yaml` (e.g. `...\wft\uat`),
+1. Create a UAT share folder whose path passes the environment check (by default, a path with a `uat` folder in it, e.g. `...\wft\uat`; see `config/environments.yaml` and the optional local `environments.yaml`),
    containing `meta\environment` with the text `uat`.
 2. Put a `uat.env` in `%USERPROFILE%\.wft\` (or the folder named by `WFT_HOME`):
    `WFT_SHARE_ROOT=<that folder>`.
