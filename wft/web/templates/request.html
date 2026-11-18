@@ -51,8 +51,19 @@
 {% for s in req.steps %}{% set sd = defn.step(s.id) %}
 {% if not (req.status == "Draft" and sd in editable) %}
 <section class="card step step-{{ s.status }}">
-  <h2>{{ sd.title }} <span class="step-status">{{ s.status }}</span></h2>
-  {% if s.status == "ready" and req.status == "Active" %}
+  {% set workable = s.status in ("ready", "in_progress") and req.status == "Active" %}
+  {% set open = s.status in ("ready", "in_progress", "waiting") and req.status == "Active" %}
+  <h2>{{ sd.title }} <span class="pill pill-{{ s.status }}">{{ s.status | replace("_", " ") }}</span></h2>
+  {% if s.status == "waiting" %}
+  <div class="notice notice-warn waiting-box">
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/resume" class="row inline-form">
+      <span>Waiting on <strong>{{ wait_reasons[s.wait_reason] }}</strong>{% if s.wait_note %}: {{ s.wait_note }}{% endif %}
+        <span class="muted small">since {{ s.since | utc }} UTC</span></span>
+      <button type="submit">Resume</button>
+    </form>
+  </div>
+  {% endif %}
+  {% if open %}
   <div class="assignment row">
     {% if s.assignee %}
     <span>With <strong>{{ s.assignee | person }}</strong></span>
@@ -71,7 +82,7 @@
   </div>
   {% endif %}
   {% if sd.type == "form" %}
-    {% if s.status == "ready" and req.status == "Active" %}
+    {% if workable %}
     {% if form_errors.get(s.id) %}<p class="field-error" role="alert">Some fields need attention.</p>{% endif %}
     <form method="post" action="/requests/{{ req.request_id }}/forms" class="form" novalidate>
       <input type="hidden" name="_step" value="{{ s.id }}">
@@ -90,7 +101,7 @@
   <ul class="checklist">
   {% for item in sd.checklist %}{% set done = loop.index0 in s.ticked %}
     <li>
-      {% if s.status == "ready" and req.status == "Active" %}
+      {% if workable %}
       <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/checklist/{{ loop.index0 }}">
         <input type="hidden" name="checked" value="{{ 'false' if done else 'true' }}">
         <button type="submit" class="tick" aria-pressed="{{ 'true' if done else 'false' }}">{{ "☑" if done else "☐" }}</button>
@@ -102,14 +113,40 @@
     </li>
   {% endfor %}
   </ul>
-  {% if s.status == "ready" and req.status == "Active" %}
+  {% if workable %}
   <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/complete">
     <button type="submit" {% if s.ticked | length < sd.checklist | length %}disabled{% endif %}>Complete step</button>
   </form>
   {% endif %}
   {% endif %}
+  {% if workable %}
+  <div class="row step-actions">
+    {% if s.status == "ready" %}
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/start"><button type="submit" class="secondary">Start</button></form>
+    {% endif %}
+    <details class="wait-form">
+      <summary>Mark as waiting…</summary>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/wait" class="row inline-form">
+        <label>Waiting on
+          <select name="reason">{% for k, label in wait_reasons.items() %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+        </label>
+        <label>Note <input name="note" maxlength="500" placeholder="e.g. client to send signed form"></label>
+        <button type="submit" class="secondary">Mark waiting</button>
+      </form>
+    </details>
+  </div>
+  {% endif %}
   {% if s.status == "done" %}
-  <p class="muted">Completed by {{ s.completed_by }} at {{ s.completed_at[:16] | replace("T", " ") }} UTC</p>
+  <p class="muted">Completed by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</p>
+  {% endif %}
+  {% if s.transitions %}{% set t = step_timing(s) %}
+  <p class="timings small muted">
+    {% if t.ready_at %}Ready {{ t.ready_at | utc }}{% endif %}
+    {% if t.started_at %} · started after {{ t.queued | duration }}{% endif %}
+    {% if t.working %} · working {{ t.working | duration }}{% endif %}
+    {% for reason, secs in t.waiting.items() %} · waiting on {{ wait_reasons[reason] | lower }} {{ secs | duration }}{% endfor %}
+    {% if t.elapsed is not none %} · {{ "took" if t.finished_at else "open for" }} {{ t.elapsed | duration }}{% endif %}
+  </p>
   {% endif %}
 </section>
 {% endif %}

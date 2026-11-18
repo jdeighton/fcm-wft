@@ -67,3 +67,15 @@ header nav a:not(.brand):hover { text-decoration:underline; }
 .assignment form { display:inline-flex; }
 .inline-form { gap:6px; align-items:center; }
 .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.pill { font-size:.72rem; padding:1px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); font-weight:400; white-space:nowrap; }
+.pill-ready { color:var(--accent); border-color:var(--accent); }
+.pill-in_progress { color:var(--ok); border-color:var(--ok); }
+.pill-waiting { color:var(--warn); border-color:var(--warn); }
+.pill-done, .pill-skipped { color:var(--muted); }
+.filters { margin-bottom:12px; }
+th a { color:inherit; text-decoration:none; } th a:hover { text-decoration:underline; }
+.waiting-box { border-radius:6px; margin:6px 0 10px; }
+.step-actions { gap:12px; align-items:center; margin-top:8px; }
+.wait-form summary { cursor:pointer; color:var(--accent); font-size:.9rem; }
+.wait-form form { margin-top:6px; }
+.timings { margin:6px 0 0; }

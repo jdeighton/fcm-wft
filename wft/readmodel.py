@@ -5,6 +5,7 @@ Deleting the cache file is always safe; the next start re-ingests every journal.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 import logging
 import sqlite3
 import threading
@@ -13,7 +14,7 @@ from typing import Iterable
 
 from wft import engine
 from wft.definitions import DefinitionRegistry
-from wft.engine import Note, RequestState, StepState
+from wft.engine import Note, RequestState, StepState, Transition
 from wft.events import Event
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS journal_cursor (
 """
 TABLES = ("events", "requests", "conflicts", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 4
+CACHE_VERSION = 6
 
 
 class ReadModel:
@@ -159,15 +160,16 @@ class ReadModel:
 
 
 def _dump_state(state: RequestState) -> str:
-    d = {k: getattr(state, k) for k in state.__dataclass_fields__ if k not in ("steps", "notes")}
-    d["steps"] = [{**{k: getattr(s, k) for k in s.__dataclass_fields__}, "ticked": sorted(s.ticked)}
-                  for s in state.steps]
-    d["notes"] = [{"ts": n.ts, "actor": n.actor, "text": n.text} for n in state.notes]
+    d = asdict(state)
+    for step in d["steps"]:
+        step["ticked"] = sorted(step["ticked"])
     return json.dumps(d, sort_keys=True)
 
 
 def _load_state(text: str) -> RequestState:
     d = json.loads(text)
-    d["steps"] = tuple(StepState(**{**s, "ticked": frozenset(s["ticked"])}) for s in d["steps"])
+    d["steps"] = tuple(StepState(**{**s, "ticked": frozenset(s["ticked"]),
+                                    "transitions": tuple(Transition(**t) for t in s["transitions"])})
+                       for s in d["steps"])
     d["notes"] = tuple(Note(**n) for n in d["notes"])
     return RequestState(**d)

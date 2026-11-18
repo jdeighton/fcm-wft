@@ -41,6 +41,10 @@ def test_submit_validates_then_activates_with_inputs_and_reference(svc):
     state, _ = svc.get(rid)
     assert state.status == engine.ACTIVE and state.inputs == CAPTURE
     assert state.step("capture").status == engine.DONE and state.step("capture").data == CAPTURE
+    from wft.timings import step_timing
+    t = step_timing(state.step("capture"))
+    assert t.started_at == state.created_at and t.finished_at == state.submitted_at and t.queued == 0
+    assert t.working == t.elapsed  # the whole Draft period counts as working on the capture
     assert state.current_step == "apply"
     assert state.reference == f"LIM-{state.submitted_at[:4]}-0001"
     with pytest.raises(engine.CommandError, match="not Draft"):

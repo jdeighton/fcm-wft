@@ -22,6 +22,9 @@ REQUEST_CREATED = "request_created"
 REQUEST_SUBMITTED = "request_submitted"
 FORM_SAVED = "form_saved"
 CHECKLIST_ITEM_SET = "checklist_item_set"
+STEP_STARTED = "step_started"
+STEP_WAITING = "step_waiting"    # payload: step, reason, note
+STEP_RESUMED = "step_resumed"
 STEP_COMPLETED = "step_completed"
 REFERENCE_ASSIGNED = "reference_assigned"
 NOTE_ADDED = "note_added"
@@ -39,7 +42,21 @@ COMPLETED = "Completed"
 
 PENDING = "pending"
 READY = "ready"
+IN_PROGRESS = "in_progress"
+WAITING = "waiting"
 DONE = "done"
+SKIPPED = "skipped"
+OPEN_STEP = frozenset({READY, IN_PROGRESS, WAITING})  # steps someone needs to do something about
+WORKABLE = frozenset({READY, IN_PROGRESS})           # steps that can be worked on right now
+FINISHED_STEP = frozenset({DONE, SKIPPED})
+
+WAIT_REASONS = {
+    "client": "Client",
+    "internal": "Internal team",
+    "krm22": "KRM22",
+    "trading_system": "Trading system",
+    "other": "Other",
+}
 
 MAX_NOTE_LENGTH = 4000
 
@@ -67,6 +84,16 @@ class NewEvent:
 
 
 @dataclass(frozen=True)
+class Transition:
+    """A step entering a state. Timings are derived from these."""
+    ts: str
+    status: str
+    actor: str
+    reason: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
 class StepState:
     id: str
     status: str
@@ -76,6 +103,20 @@ class StepState:
     data: dict | None = None    # submitted form data
     draft: dict | None = None   # form data saved but not yet submitted
     assignee: str | None = None  # who has claimed or been assigned the step
+    transitions: tuple[Transition, ...] = ()
+
+    @property
+    def since(self) -> str | None:
+        """When the step entered its current state."""
+        return self.transitions[-1].ts if self.transitions else None
+
+    @property
+    def wait_reason(self) -> str | None:
+        return self.transitions[-1].reason if self.status == WAITING and self.transitions else None
+
+    @property
+    def wait_note(self) -> str | None:
+        return self.transitions[-1].note if self.status == WAITING and self.transitions else None
 
 
 @dataclass(frozen=True)
@@ -103,6 +144,7 @@ class RequestState:
     reference: str | None = None
     notes: tuple[Note, ...] = ()
     owner: str = ""  # accountable person; the creator unless reassigned
+    completed_at: str | None = None
 
     def step(self, step_id: str) -> StepState:
         for s in self.steps:
@@ -112,7 +154,7 @@ class RequestState:
 
     @property
     def current_step(self) -> str | None:
-        return next((s.id for s in self.steps if s.status == READY), None)
+        return next((s.id for s in self.steps if s.status in OPEN_STEP), None)
 
 
 def initial_forms(defn: WorkflowDef) -> list[StepDef]:
@@ -193,7 +235,7 @@ def submit_request(state: RequestState, defn: WorkflowDef, forms: dict[str, dict
 
 def complete_form(state: RequestState, defn: WorkflowDef, step_id: str, data: dict) -> NewEvent:
     """Validate and submit a form step that became ready while the request is Active."""
-    step = _ready_step(state, defn, step_id)
+    step = _workable_step(state, defn, step_id)
     sd = defn.step(step_id)
     if sd.type != "form":
         raise CommandError(f"Step {step_id!r} is not a form")
@@ -205,7 +247,7 @@ def complete_form(state: RequestState, defn: WorkflowDef, step_id: str, data: di
 
 
 def set_checklist_item(state: RequestState, defn: WorkflowDef, step_id: str, index: int, checked: bool) -> NewEvent:
-    step = _ready_step(state, defn, step_id)
+    step = _workable_step(state, defn, step_id)
     if not 0 <= index < len(defn.step(step_id).checklist):
         raise CommandError(f"Step {step_id!r} has no checklist item {index}")
     if (index in step.ticked) == checked:
@@ -215,13 +257,39 @@ def set_checklist_item(state: RequestState, defn: WorkflowDef, step_id: str, ind
 
 
 def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
-    step = _ready_step(state, defn, step_id)
+    step = _workable_step(state, defn, step_id)
     if defn.step(step_id).type == "form":
         raise CommandError(f"Step {step_id!r} is a form; submit the form to complete it")
     missing = len(defn.step(step_id).checklist) - len(step.ticked)
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
     return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
+
+
+def start_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
+    step = _workable_step(state, defn, step_id)
+    if step.status != READY:
+        raise CommandError(f"Step {step_id!r} has already started")
+    return NewEvent(STEP_STARTED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
+
+
+def wait_step(state: RequestState, defn: WorkflowDef, step_id: str, reason: str, note: str = "") -> NewEvent:
+    """Mark a step as waiting on someone or something, so the wait is timed and attributed."""
+    _workable_step(state, defn, step_id)
+    if reason not in WAIT_REASONS:
+        raise CommandError(f"Choose what the step is waiting on ({', '.join(WAIT_REASONS.values())})")
+    note = note.strip()
+    if reason == "other" and not note:
+        raise CommandError("Say what the step is waiting on")
+    return NewEvent(STEP_WAITING, seq=state.seq + 1, prev=state.last_event,
+                    payload={"step": step_id, "reason": reason, "note": note or None})
+
+
+def resume_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
+    step = _open_step(state, defn, step_id)
+    if step.status != WAITING:
+        raise CommandError(f"Step {step_id!r} isn't waiting")
+    return NewEvent(STEP_RESUMED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
 
 
 def assign_reference(state: RequestState, reference: str) -> NewEvent:
@@ -242,7 +310,7 @@ def change_owner(state: RequestState, new_owner: str) -> NewEvent:
 
 
 def claim_step(state: RequestState, defn: WorkflowDef, step_id: str, me: str) -> NewEvent:
-    step = _ready_step(state, defn, step_id)
+    step = _open_step(state, defn, step_id)
     if step.assignee == me:
         raise CommandError("You already have this step")
     if step.assignee:
@@ -251,7 +319,7 @@ def claim_step(state: RequestState, defn: WorkflowDef, step_id: str, me: str) ->
 
 
 def assign_step(state: RequestState, defn: WorkflowDef, step_id: str, user: str) -> NewEvent:
-    step = _ready_step(state, defn, step_id)
+    step = _open_step(state, defn, step_id)
     user = user.strip().lower()
     if not user:
         raise CommandError("Choose who to assign the step to")
@@ -262,7 +330,7 @@ def assign_step(state: RequestState, defn: WorkflowDef, step_id: str, user: str)
 
 
 def release_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
-    step = _ready_step(state, defn, step_id)
+    step = _open_step(state, defn, step_id)
     if not step.assignee:
         raise CommandError("Nobody has this step")
     return NewEvent(STEP_ASSIGNMENT, seq=ANNOTATION_SEQ,
@@ -295,7 +363,7 @@ def actions(state: RequestState, defn: WorkflowDef,
         return []
     out: list[tuple[str, list[Command]]] = []
     for step in state.steps:
-        if step.status != READY:
+        if step.status not in WORKABLE:
             continue
         sd = defn.step(step.id)
         if sd.type == "manual":
@@ -322,18 +390,28 @@ def _form_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepStat
         if sd not in initial_forms(defn):
             raise CommandError(f"Step {step_id!r} can't be filled in until the request is submitted")
         return state.step(step_id)
-    return _ready_step(state, defn, step_id)
+    return _workable_step(state, defn, step_id)
 
 
-def _ready_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
+def _open_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
+    """A step that's ready, in progress or waiting on an Active request."""
     if state.status != ACTIVE:
         raise CommandError(f"Request is {state.status}")
     try:
         step = state.step(step_id)
     except KeyError:
         raise CommandError(f"Unknown step {step_id!r}") from None
-    if step.status != READY:
-        raise CommandError(f"Step {step_id!r} is {step.status}")
+    if step.status not in OPEN_STEP:
+        raise CommandError(f"Step {step_id!r} is {step.status.replace('_', ' ')}")
+    return step
+
+
+def _workable_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
+    """A step that can be worked on now: ready or in progress (a waiting step must be resumed first)."""
+    step = _open_step(state, defn, step_id)
+    if step.status == WAITING:
+        raise CommandError(f"Step {step_id!r} is waiting on {WAIT_REASONS[step.wait_reason].lower()}; "
+                           "resume it to carry on")
     return step
 
 
@@ -360,29 +438,44 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
 
     if event.type == FORM_SAVED:
         step = state.step(event.payload["step"])
+        if state.status == ACTIVE:
+            step = _start(step, event)
         return _replace_step(state, replace(step, draft=event.payload["data"]))
 
     if event.type == REQUEST_SUBMITTED:
         inputs: dict = {}
         for step_id, data in event.payload["forms"].items():
             inputs.update(data)
-            step = state.step(step_id)
-            state = _replace_step(state, replace(step, status=DONE, data=data, draft=None,
+            # The capture form was being filled in for the whole Draft period.
+            step = replace(state.step(step_id),
+                           transitions=(Transition(state.created_at, IN_PROGRESS, state.created_by),))
+            step = _to(step, DONE, event)
+            state = _replace_step(state, replace(step, data=data, draft=None,
                                                  completed_by=event.actor, completed_at=event.ts))
         state = replace(state, status=ACTIVE, inputs=inputs, submitted_by=event.actor, submitted_at=event.ts)
-        return _advance(state, defn)
+        return _advance(state, defn, event)
 
     if event.type == CHECKLIST_ITEM_SET:
-        step = state.step(event.payload["step"])
+        step = _start(state.step(event.payload["step"]), event)
         idx = event.payload["index"]
         ticked = step.ticked | {idx} if event.payload["checked"] else step.ticked - {idx}
         return _replace_step(state, replace(step, ticked=frozenset(ticked)))
 
+    if event.type == STEP_STARTED:
+        return _replace_step(state, _start(state.step(event.payload["step"]), event))
+
+    if event.type == STEP_WAITING:
+        step = _start(state.step(event.payload["step"]), event)
+        return _replace_step(state, _to(step, WAITING, event, event.payload["reason"], event.payload.get("note")))
+
+    if event.type == STEP_RESUMED:
+        return _replace_step(state, _to(state.step(event.payload["step"]), IN_PROGRESS, event))
+
     if event.type == STEP_COMPLETED:
-        step = state.step(event.payload["step"])
-        state = _replace_step(state, replace(step, status=DONE, completed_by=event.actor, completed_at=event.ts,
+        step = _to(_start(state.step(event.payload["step"]), event), DONE, event)
+        state = _replace_step(state, replace(step, completed_by=event.actor, completed_at=event.ts,
                                              data=event.payload.get("data", step.data), draft=None))
-        return _advance(state, defn)
+        return _advance(state, defn, event)
 
     raise ValueError(f"Unknown event type {event.type!r}")
 
@@ -409,22 +502,33 @@ def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
     raise ValueError(f"Unknown annotation {event.type!r}")
 
 
+def _to(step: StepState, status: str, event: Event, reason: str | None = None, note: str | None = None) -> StepState:
+    return replace(step, status=status,
+                   transitions=step.transitions + (Transition(event.ts, status, event.actor, reason, note),))
+
+
+def _start(step: StepState, event: Event) -> StepState:
+    """The first work on a ready step starts it."""
+    return _to(step, IN_PROGRESS, event) if step.status == READY else step
+
+
 def _replace_step(state: RequestState, new: StepState) -> RequestState:
     return replace(state, steps=tuple(new if s.id == new.id else s for s in state.steps))
 
 
-def _advance(state: RequestState, defn: WorkflowDef) -> RequestState:
-    """Make pending steps ready once their dependencies are done; complete the request when all are done."""
+def _advance(state: RequestState, defn: WorkflowDef, event: Event) -> RequestState:
+    """Make pending steps ready once their dependencies are finished; complete the request when all are."""
     if state.status == DRAFT:
         return state
-    done = {s.id for s in state.steps if s.status == DONE}
+    finished = {s.id for s in state.steps if s.status in FINISHED_STEP}
     steps = tuple(
-        replace(s, status=READY)
-        if s.status == PENDING and set(defn.step(s.id).depends_on) <= done else s
+        _to(s, READY, event)
+        if s.status == PENDING and set(defn.step(s.id).depends_on) <= finished else s
         for s in state.steps
     )
-    status = COMPLETED if all(s.status == DONE for s in steps) else state.status
-    return replace(state, steps=steps, status=status)
+    if all(s.status in FINISHED_STEP for s in steps):
+        return replace(state, steps=steps, status=COMPLETED, completed_at=event.ts)
+    return replace(state, steps=steps)
 
 
 @dataclass(frozen=True)

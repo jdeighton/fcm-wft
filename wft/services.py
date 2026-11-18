@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from wft import __version__, engine
+from wft import __version__, engine, timings
 from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
@@ -43,6 +43,49 @@ class Tasks:
     on_my_requests: list[Task]   # ready, unclaimed steps on requests I own
     claimable: list[Task]        # ready, unclaimed steps on other people's requests
     drafts: list[RequestState]   # my requests not yet submitted
+
+
+@dataclass(frozen=True)
+class Row:
+    """One line of the Open requests list."""
+    request: RequestState
+    workflow_title: str
+    current_step_title: str | None
+    current_step_status: str | None
+    age: float
+    in_step: float | None
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """A step on the Waiting-on board."""
+    request: RequestState
+    step_id: str
+    step_title: str
+    reason: str
+    note: str | None
+    since: str
+    by: str
+    waited: float
+
+
+STATUS_FILTERS = {
+    "open": (engine.DRAFT, engine.ACTIVE),
+    "draft": (engine.DRAFT,),
+    "active": (engine.ACTIVE,),
+    "completed": (engine.COMPLETED,),
+    "all": None,
+}
+SORT_KEYS = {
+    "age": lambda r: r.age,
+    "in_step": lambda r: r.in_step if r.in_step is not None else -1,
+    "reference": lambda r: r.request.reference or "",
+    "title": lambda r: r.request.title.lower(),
+    "workflow": lambda r: r.workflow_title.lower(),
+    "owner": lambda r: r.request.owner,
+    "status": lambda r: r.request.status,
+    "created": lambda r: r.request.created_at,
+}
 
 
 @dataclass(frozen=True)
@@ -241,7 +284,7 @@ class Services:
             except KeyError:
                 continue
             for st in r.steps:
-                if st.status != engine.READY:
+                if st.status not in engine.OPEN_STEP:
                     continue
                 task = Task(r, st.id, defn.step(st.id).title, defn.title)
                 if st.assignee == user:
@@ -255,6 +298,70 @@ class Services:
         oldest = lambda t: t.request.created_at  # noqa: E731
         return Tasks(sorted(mine, key=oldest), sorted(on_mine, key=oldest), sorted(claimable, key=oldest),
                      sorted(drafts, key=lambda r: r.created_at))
+
+    def start_step(self, request_id: str, step_id: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.start_step(state, defn, step_id))
+
+    def wait_step(self, request_id: str, step_id: str, reason: str, note: str = "") -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.wait_step(state, defn, step_id, reason, note))
+
+    def resume_step(self, request_id: str, step_id: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.resume_step(state, defn, step_id))
+
+    # --- views ---------------------------------------------------------------
+
+    def open_requests(self, status: str = "open", workflow: str = "", owner: str = "", q: str = "",
+                      sort: str = "age", descending: bool = True, now=None) -> list[Row]:
+        now = now or timings.now_utc()
+        wanted = STATUS_FILTERS.get(status, STATUS_FILTERS["open"])
+        q = q.strip().lower()
+        rows = []
+        for r in self.rm.list_requests():
+            if wanted is not None and r.status not in wanted:
+                continue
+            if owner and r.owner != owner.lower():
+                continue
+            try:
+                defn = self.registry.get(r.workflow)
+            except KeyError:
+                continue
+            if workflow and defn.id != workflow:
+                continue
+            if q and q not in r.title.lower() and q not in (r.reference or "").lower():
+                continue
+            current = next((s for s in r.steps if s.id == r.current_step), None)
+            rows.append(Row(r, defn.title, defn.step(current.id).title if current else None,
+                            current.status if current else None,
+                            timings.request_age(r, now), timings.time_in_current_step(r, now)))
+        return sorted(rows, key=SORT_KEYS.get(sort, SORT_KEYS["age"]), reverse=descending)
+
+    def waiting_board(self, now=None) -> dict[str, list[Waiting]]:
+        """Waiting steps grouped by reason (in the order of engine.WAIT_REASONS), longest wait first."""
+        now = now or timings.now_utc()
+        board: dict[str, list[Waiting]] = {reason: [] for reason in engine.WAIT_REASONS}
+        for r in self.rm.list_requests():
+            if r.status != engine.ACTIVE:
+                continue
+            try:
+                defn = self.registry.get(r.workflow)
+            except KeyError:
+                continue
+            for st in r.steps:
+                if st.status != engine.WAITING:
+                    continue
+                last = st.transitions[-1]
+                board.setdefault(last.reason, []).append(Waiting(
+                    r, st.id, defn.step(st.id).title, last.reason, last.note, last.ts, last.actor,
+                    timings.seconds_between(last.ts, now)))
+        for items in board.values():
+            items.sort(key=lambda w: w.waited, reverse=True)
+        return board
 
     def save_form(self, request_id: str, step_id: str, data: dict) -> None:
         with self._lock:

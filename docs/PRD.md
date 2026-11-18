@@ -358,6 +358,8 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 
 - All timestamps recorded in **UTC**. No business-hours calendar in Release 1; business-day analytics can be derived later from raw events.
 - For each step instance the system can derive: time ready → started, working time, waiting time by reason, hold time, total elapsed.
+- A ready step starts with an explicit **Start** or on the first work done on it (ticking an item, saving its form, completing it). A waiting step must be resumed before work continues. The capture form counts as being worked on from the request's creation until it is submitted.
+- Request age runs from submission (creation, for a Draft) to completion; "time in step" is how long the current step has been in its current state.
 
 ### 7.9 Logging & diagnostics
 
