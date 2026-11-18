@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Annotated
 
 from fastapi import FastAPI, Form, Request
@@ -25,9 +26,11 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals.update(env=env, user=services.user)
+    templates.env.filters["person"] = lambda u: services.team.name(u) if u else "—"
 
     def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
-        ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()])
+        ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()],
+                   is_admin=services.is_admin, my_task_count=len(services.tasks().mine))
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
     def back_to(request_id: str) -> RedirectResponse:
@@ -61,6 +64,30 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         services.acknowledge_conflict(event_id)
         return RedirectResponse(request.headers.get("referer") or "/", status_code=303)
 
+    @app.get("/tasks")
+    def tasks(request: Request):
+        return render(request, "tasks.html", tasks=services.tasks())
+
+    @app.post("/requests/{request_id}/owner")
+    def change_owner(request_id: str, owner: Annotated[str, Form()]):
+        services.change_owner(request_id, owner)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/claim")
+    def claim(request: Request, request_id: str, step_id: str):
+        services.claim_step(request_id, step_id)
+        return RedirectResponse(_back(request, f"/requests/{request_id}"), status_code=303)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/assign")
+    def assign(request_id: str, step_id: str, user: Annotated[str, Form()]):
+        services.assign_step(request_id, step_id, user)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/release")
+    def release(request_id: str, step_id: str):
+        services.release_step(request_id, step_id)
+        return back_to(request_id)
+
     @app.get("/")
     def index(request: Request):
         workflows = [(w, w.runnable_by(__version__)) for w in services.registry.latest()]
@@ -83,7 +110,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
             data = values.get(sd.id, st.draft if st.data is None else st.data)
             step_errors = {f"{sd.id}.{k}": v for k, v in (errors.get(sd.id) or {}).items()}
             forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.")
-        return render(request, "request.html", status_code, req=state, defn=defn, forms=forms,
+        return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
                       editable=editable_forms(state, defn), form_errors=errors,
                       history=services.rm.history(request_id))
 
@@ -141,6 +168,12 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     return app
 
 
+def _back(request: Request, default: str) -> str:
+    """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
+    path = urlsplit(request.headers.get("referer") or "").path
+    return path if path == "/" or path == "/tasks" or path.startswith("/requests/") else default
+
+
 def editable_forms(state, defn) -> list:
     """Form steps the user can fill in now."""
     if state.status == engine.DRAFT:
@@ -157,6 +190,8 @@ def _describe(services: Services, e: Event) -> dict:
         what = f"{'ticking' if e.payload['checked'] else 'unticking'} item {e.payload['index'] + 1} of step {e.payload['step']!r}"
     elif e.type == engine.STEP_COMPLETED:
         what = f"completing step {e.payload['step']!r}"
+    elif e.type == engine.STEP_ASSIGNMENT:
+        what = f"claiming step {e.payload['step']!r}"
     elif e.type == engine.FORM_SAVED:
         what = f"saving the {e.payload['step']!r} form"
     elif e.type == engine.REQUEST_SUBMITTED:

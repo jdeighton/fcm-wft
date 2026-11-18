@@ -15,6 +15,7 @@ from wft.definitions import (MANIFEST_FILE, PUBLISHED_DIR, DefinitionError, Work
                              parse_version, parse_workflow, referenced_files)
 from wft.events import Event
 from wft.expressions import ExpressionError, is_template, parse
+from wft.team import REPO_ROLES_FILE, roles_errors
 
 WORKFLOW_SCHEMA = json.loads((Path(__file__).parent / "schemas" / "workflow.schema.json").read_text(encoding="utf-8"))
 _SCHEMA_VALIDATOR = jsonschema.Draft202012Validator(WORKFLOW_SCHEMA)
@@ -98,6 +99,14 @@ def validate_repo(definitions_dir: Path, share_root: Path | None = None,
         if isinstance(wid, str) and path.stem != wid:
             report.issues.append(Issue(source, f"file name must match the workflow id ({wid}.yaml)"))
         loaded[wid] = (path, data)
+
+    roles = definitions_dir / REPO_ROLES_FILE
+    if roles.is_file():
+        try:
+            report.issues += [Issue(REPO_ROLES_FILE.as_posix(), m)
+                              for m in roles_errors(yaml.safe_load(roles.read_text(encoding="utf-8")))]
+        except yaml.YAMLError as e:
+            report.issues.append(Issue(REPO_ROLES_FILE.as_posix(), f"not valid YAML: {e}"))
 
     known_ids = {k for k in loaded if isinstance(k, str)}
     for wid, (path, data) in loaded.items():

@@ -11,8 +11,12 @@
       data-conflicts="{{ conflicts | length }}" data-autorefresh="{% block autorefresh %}true{% endblock %}">
   {% if env != "prod" %}<div class="env-banner">{{ env | upper }} environment: not production</div>{% endif %}
   <header>
-    <a href="/" class="brand">WFT</a>
-    <span class="who">{{ user }}</span>
+    <nav>
+      <a href="/" class="brand">WFT</a>
+      <a href="/tasks">My tasks{% if my_task_count %} <span class="badge">{{ my_task_count }}</span>{% endif %}</a>
+      <a href="/">Requests</a>
+    </nav>
+    <span class="who">{{ user | person }}{% if is_admin %} <span class="badge">Admin</span>{% endif %}</span>
   </header>
   {% if status.read_only %}
   <div class="notice notice-warn" role="alert">

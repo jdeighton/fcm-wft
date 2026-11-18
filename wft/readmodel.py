@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS journal_cursor (
 """
 TABLES = ("events", "requests", "conflicts", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 
 class ReadModel:

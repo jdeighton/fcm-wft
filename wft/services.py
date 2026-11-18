@@ -13,6 +13,7 @@ from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
 from wft.readmodel import ReadModel
 from wft.repository import ReferenceAllocator, ReferenceUnavailable, Repository, ShareUnavailable
+from wft.team import Team, TeamSource
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,22 @@ class ReadOnly(Exception):
 
 
 @dataclass(frozen=True)
+class Task:
+    request: RequestState
+    step_id: str
+    step_title: str
+    workflow_title: str
+
+
+@dataclass(frozen=True)
+class Tasks:
+    mine: list[Task]             # ready steps I've claimed or been assigned
+    on_my_requests: list[Task]   # ready, unclaimed steps on requests I own
+    claimable: list[Task]        # ready, unclaimed steps on other people's requests
+    drafts: list[RequestState]   # my requests not yet submitted
+
+
+@dataclass(frozen=True)
 class Status:
     read_only: bool
     reason: str | None
@@ -39,7 +56,7 @@ class Status:
 class Services:
     def __init__(self, repo: Repository, read_model: ReadModel, registry: DefinitionRegistry,
                  user: str, host: str, acknowledged_path: Path | None = None,
-                 references: ReferenceAllocator | None = None):
+                 references: ReferenceAllocator | None = None, team: TeamSource | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
@@ -47,6 +64,7 @@ class Services:
         self.host = host
         self._acknowledged_path = acknowledged_path
         self.references = references
+        self.team_source = team
         self._lock = threading.Lock()
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -61,6 +79,8 @@ class Services:
             added = self.registry.refresh()
             if added:
                 log.info("Loaded workflow definition(s): %s", ", ".join(added))
+            if self.team_source is not None and self.team_source.refresh():
+                log.info("Loaded team configuration: admins %s", ", ".join(self.team.admins) or "none")
             events, cursor = self.repo.read_since(self.rm.cursor())
         except OSError as e:
             self._go_read_only(e)
@@ -168,6 +188,73 @@ class Services:
         with self._lock:
             self._record(request_id, defn, engine.create_request(defn, title))
         return request_id
+
+    # --- team, ownership and tasks ------------------------------------------
+
+    @property
+    def team(self) -> Team:
+        return self.team_source.team if self.team_source is not None else Team()
+
+    @property
+    def is_admin(self) -> bool:
+        return self.team.is_admin(self.user)
+
+    def people(self) -> list[tuple[str, str]]:
+        """Everyone a request or step could be given to: the team plus anyone who has used WFT."""
+        seen = {self.user}
+        for r in self.rm.list_requests():
+            seen |= {r.owner, r.created_by} | {s.assignee for s in r.steps if s.assignee}
+        return self.team.choices(seen)
+
+    def change_owner(self, request_id: str, owner: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.change_owner(state, owner))
+
+    def claim_step(self, request_id: str, step_id: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.claim_step(state, defn, step_id, self.user))
+
+    def assign_step(self, request_id: str, step_id: str, user: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.assign_step(state, defn, step_id, user))
+
+    def release_step(self, request_id: str, step_id: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.release_step(state, defn, step_id))
+
+    def tasks(self, user: str | None = None) -> Tasks:
+        user = (user or self.user).lower()
+        mine, on_mine, claimable, drafts = [], [], [], []
+        for r in self.rm.list_requests():
+            if r.status == engine.DRAFT:
+                if r.owner == user:
+                    drafts.append(r)
+                continue
+            if r.status != engine.ACTIVE:
+                continue
+            try:
+                defn = self.registry.get(r.workflow)
+            except KeyError:
+                continue
+            for st in r.steps:
+                if st.status != engine.READY:
+                    continue
+                task = Task(r, st.id, defn.step(st.id).title, defn.title)
+                if st.assignee == user:
+                    mine.append(task)
+                elif st.assignee:
+                    continue
+                elif r.owner == user:
+                    on_mine.append(task)
+                else:
+                    claimable.append(task)
+        oldest = lambda t: t.request.created_at  # noqa: E731
+        return Tasks(sorted(mine, key=oldest), sorted(on_mine, key=oldest), sorted(claimable, key=oldest),
+                     sorted(drafts, key=lambda r: r.created_at))
 
     def save_form(self, request_id: str, step_id: str, data: dict) -> None:
         with self._lock:
