@@ -15,7 +15,8 @@ from wft.configfiles import DEFAULT_REASONS, Reason, ReloadingFile
 from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
-from wft.readmodel import ReadModel
+from wft.notifications import Notice, Notifier, NullNotifier, derive
+from wft.readmodel import Change, ReadModel
 from wft.repository import (AttachmentStore, AttachmentTooLarge, ReferenceAllocator, ReferenceUnavailable, Repository,
                             ShareUnavailable)
 from wft.team import Team, TeamSource
@@ -122,7 +123,8 @@ class Services:
                  references: ReferenceAllocator | None = None, team: TeamSource | None = None,
                  attachments: AttachmentStore | None = None, adapters: dict[str, Adapter] | None = None,
                  picklists: PicklistCache | None = None,
-                 reasons: ReloadingFile[tuple[Reason, ...]] | None = None):
+                 reasons: ReloadingFile[tuple[Reason, ...]] | None = None,
+                 notifier: Notifier | None = None, last_online_path: Path | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
@@ -135,6 +137,12 @@ class Services:
         self.adapters = adapters or {}
         self.picklists = picklists
         self.reasons_source = reasons
+        self.notifier = notifier or NullNotifier()
+        self._last_online_path = last_online_path
+        # Only changes after this time are worth telling the user about (not a whole history after a rebuild).
+        self._notice_floor = self._read_last_online() or utc_now()
+        self.away: list[Notice] = []      # what changed while the user was offline, shown once at start-up
+        self._first_sync = True
         self._lock = threading.RLock()  # re-entrant: follow-ups (e.g. starting sub-requests) run inside an action
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -157,7 +165,10 @@ class Services:
         except OSError as e:
             self._go_read_only(e)
             return False
-        self.rm.ingest(events, cursor)
+        changes: list[Change] = []
+        self.rm.ingest(events, cursor, changes)
+        self._notify(changes)
+        self._write_last_online()
         if self._read_only_reason is not None:
             log.info("Share reachable again; leaving read-only mode")
             self._read_only_reason = self._read_only_since = None
@@ -214,6 +225,7 @@ class Services:
         if self.status().read_only:
             raise ReadOnly("The share is unavailable, so the cache can't be rebuilt right now")
         with self._lock:
+            self._notice_floor = utc_now()  # don't re-announce what's already been seen
             self.rm.reset()
             self.sync()
 
@@ -226,6 +238,59 @@ class Services:
             log.warning("Share unavailable; switching to read-only mode: %s", error)
             self._read_only_since = utc_now()
         self._read_only_reason = str(error) if isinstance(error, ShareUnavailable) else f"Share error: {error}"
+
+    # --- notifications -----------------------------------------------------
+
+    def _notify(self, changes: list[Change]) -> None:
+        notices: list[Notice] = []
+        for ch in changes:
+            try:
+                defn = self.registry.get(ch.after.workflow)
+                titles = {s.id: s.title for s in defn.steps}
+                types = {s.id: s.type for s in defn.steps}
+            except KeyError:
+                titles, types = {}, {}
+            notices += derive(ch.before, ch.after, ch.new_events, self.user, titles, self._notice_floor, types)
+        if self._first_sync:
+            self._first_sync = False
+            self.away = notices
+        if not notices:
+            return
+        self.rm.add_notices(notices)
+        if len(notices) > 5:  # don't flood the desktop: one summary toast
+            self.notifier.show(Notice("", "summary", "WFT", f"{len(notices)} updates need your attention", notices[-1].ts))
+        else:
+            for n in notices:
+                self.notifier.show(n)
+
+    def notices(self, unread_only: bool = False, after_id: int = 0) -> list[dict]:
+        return self.rm.notices(unread_only=unread_only, after_id=after_id)
+
+    def unread_count(self) -> int:
+        return self.rm.unread_count()
+
+    def mark_read(self, request_id: str | None = None) -> None:
+        self.rm.mark_read(request_id)
+
+    def dismiss_away(self) -> None:
+        self.away = []
+
+    def _read_last_online(self) -> str | None:
+        if self._last_online_path is None:
+            return None
+        try:
+            return json.loads(self._last_online_path.read_text(encoding="utf-8"))["last_online"]
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def _write_last_online(self) -> None:
+        if self._last_online_path is None:
+            return
+        try:
+            self._last_online_path.parent.mkdir(parents=True, exist_ok=True)
+            self._last_online_path.write_text(json.dumps({"last_online": utc_now()}), encoding="utf-8")
+        except OSError as e:
+            log.warning("Couldn't record when WFT was last online: %s", e)
 
     # --- conflicts ---------------------------------------------------------
 
@@ -654,7 +719,8 @@ class Services:
                      engine.start_subworkflow(state, defn, step_id, child_defn.key, planned), follow=False)
         for child in planned:
             parent = {"request": state.request_id, "step": step_id, "index": child["index"]}
-            self._record(child["id"], child_defn, engine.create_request(child_defn, child["title"], parent=parent),
+            self._record(child["id"], child_defn,
+                         engine.create_request(child_defn, child["title"], parent=parent, owner=state.owner),
                          follow=False)
             cstate = self.rm.get(child["id"])
             forms = {f.id: _for_form(f, child["inputs"]) for f in engine.initial_forms(child_defn)}

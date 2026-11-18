@@ -246,6 +246,8 @@ Later: cycle-time analytics per workflow/step, off-process by reason, ETA.
 - **FR-11.1** Windows desktop (toast) notifications from the user's running instance when: a step becomes ready on a request I own; a step is assigned to me; a request is reassigned to me; an impact flag is raised on my request; a request I own changes lifecycle state due to another user.
 - **FR-11.2** Unread-count badge in the browser tab title.
 - **FR-11.3** Notifications only fire while the user's instance is running; on startup the user sees what changed since they were last online.
+- **FR-11.4** Only changes made by other people notify; automatic knock-ons (e.g. children cancelled with their parent) don't notify separately. More than five at once give one summary toast. Notices are kept in the user's local cache with read/unread; opening a request marks its notices read.
+- **FR-11.5** `WFT_NOTIFICATIONS=windows` (default on Windows) shows native toasts via PowerShell's built-in toast API, with no extra packages; `browser` uses the browser's own notifications while a WFT tab is open (the user enables them on the Notifications page); `off` shows only the in-app count. The time the user was last online is kept in their profile, so deleting the cache doesn't replay old changes as new.
 
 ### 6.12 Exports
 

@@ -21,7 +21,7 @@ from wft.adapters import AdapterUnavailable, NotFoundInSystem
 HERE = Path(__file__).parent
 
 
-def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
+def create_app(services: Services, env: str, token: str, port: int, browser_notifications: bool = True) -> FastAPI:
     app = FastAPI(title="WFT", docs_url=None, redoc_url=None, openapi_url=None)
     security.install(app, token, port)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -40,7 +40,9 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()],
                    is_admin=services.is_admin, my_task_count=len(services.tasks().mine),
                    open_flag_count=sum(1 for o in services.open_flags() if o.flag.blocking),
-                   has_adapters=bool(services.adapters))
+                   has_adapters=bool(services.adapters), unread=services.unread_count(),
+                   away=services.away, browser_notifications=browser_notifications,
+                   last_notice_id=(services.notices()[:1] or [{"id": 0}])[0]["id"])
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
     def back_to(request_id: str) -> RedirectResponse:
@@ -59,10 +61,29 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         return render(request, "error.html", 503, message=str(exc))
 
     @app.get("/status")
-    def status():
-        """Polled by the page to notice other users' changes and read-only mode."""
+    def status(after: int = 0):
+        """Polled by the page to notice other users' changes, read-only mode and new notifications."""
         s = services.status()
-        return {"version": s.version, "read_only": s.read_only, "conflicts": len(services.my_conflicts())}
+        new = services.notices(after_id=after) if after else []
+        return {"version": s.version, "read_only": s.read_only, "conflicts": len(services.my_conflicts()),
+                "unread": services.unread_count(),
+                "notices": [{"id": n["id"], "title": n["title"], "text": n["text"], "url": f"/requests/{n['request_id']}"}
+                            for n in reversed(new)]}
+
+    @app.get("/notifications")
+    def notifications_page(request: Request):
+        return render(request, "notifications.html", items=services.notices())
+
+    @app.post("/notifications/read")
+    def mark_all_read(request: Request):
+        services.mark_read()
+        services.dismiss_away()
+        return RedirectResponse(_back(request, "/notifications"), status_code=303)
+
+    @app.post("/notifications/dismiss-away")
+    def dismiss_away(request: Request):
+        services.dismiss_away()
+        return RedirectResponse(_back(request, "/"), status_code=303)
 
     @app.post("/cache/rebuild")
     def rebuild_cache():
@@ -320,6 +341,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
 
     @app.get("/requests/{request_id}")
     def detail(request: Request, request_id: str):
+        services.mark_read(request_id)  # looking at the request counts as seeing its notifications
         return show(request, request_id)
 
     @app.post("/requests/{request_id}/forms")
@@ -426,7 +448,7 @@ def _filesize(n: int) -> str:
 def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
-    return path if path in ("/", "/tasks", "/waiting", "/flags", "/off-process") or path.startswith("/requests/") else default
+    return path if path in ("/", "/tasks", "/waiting", "/flags", "/off-process", "/notifications") or path.startswith("/requests/") else default
 
 
 def _verify_view(state, defn, step_id: str) -> dict:

@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% if env != "prod" %}[{{ env | upper }}] {% endif %}{% block title %}WFT{% endblock %} · WFT</title>
+  <title>{% if unread %}({{ unread }}) {% endif %}{% if env != "prod" %}[{{ env | upper }}] {% endif %}{% block title %}WFT{% endblock %} · WFT</title>
   <link rel="stylesheet" href="/static/wft.css">
 </head>
 <body class="env-{{ env }}{% if status.read_only %} read-only{% endif %}"
       data-version="{{ status.version }}" data-read-only="{{ 'true' if status.read_only else 'false' }}"
-      data-conflicts="{{ conflicts | length }}" data-autorefresh="{% block autorefresh %}true{% endblock %}">
+      data-conflicts="{{ conflicts | length }}" data-autorefresh="{% block autorefresh %}true{% endblock %}"
+      data-unread="{{ unread }}" data-last-notice="{{ last_notice_id }}" data-browser-notifications="{{ 'true' if browser_notifications else 'false' }}">
   {% if env != "prod" %}<div class="env-banner">{{ env | upper }} environment: not production</div>{% endif %}
   <header>
     <nav>
@@ -19,7 +20,7 @@
       <a href="/off-process">Off-process</a>
       <a href="/flags">Flags{% if open_flag_count %} <span class="badge badge-warn">{{ open_flag_count }}</span>{% endif %}</a>
     </nav>
-    <span class="who">{{ user | person }}{% if is_admin %} <span class="badge">Admin</span>{% endif %}</span>
+    <span class="who"><a href="/notifications" class="bell" title="Notifications">🔔{% if unread %} <span class="badge" id="unread-badge">{{ unread }}</span>{% endif %}</a>{{ user | person }}{% if is_admin %} <span class="badge">Admin</span>{% endif %}</span>
   </header>
   {% if status.read_only %}
   <div class="notice notice-warn" role="alert">
@@ -38,6 +39,16 @@
     </form>
   </div>
   {% endfor %}
+  {% if away %}
+  <div class="notice notice-away" role="status">
+    <form method="post" action="/notifications/dismiss-away">
+      <strong>While you were away:</strong>
+      {% for n in away[:5] %}<a href="/requests/{{ n.request_id }}">{{ n.title }}</a> {{ n.text }}{% if not loop.last %} · {% endif %}{% endfor %}
+      {% if away | length > 5 %} · and {{ away | length - 5 }} more on the <a href="/notifications">Notifications</a> page{% endif %}
+      <button type="submit" class="secondary">Dismiss</button>
+    </form>
+  </div>
+  {% endif %}
   <div id="updates" class="notice" hidden>Other changes have arrived. <a href="">Reload</a> when you're ready.</div>
   <main>{% block content %}{% endblock %}</main>
   <script src="/static/wft.js"></script>

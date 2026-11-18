@@ -11,11 +11,30 @@
   let dirty = false;
   document.addEventListener("input", () => { dirty = true; });
 
+  // Unread count in the tab title, and (if chosen) the browser's own desktop notifications.
+  let lastNotice = Number(body.dataset.lastNotice || 0);
+  const useBrowser = body.dataset.browserNotifications === "true" && "Notification" in window;
+  const baseTitle = document.title.replace(/^\(\d+\) /, "");
+  function showUnread(n) { document.title = (n ? `(${n}) ` : "") + baseTitle; }
+  const enable = document.getElementById("enable-notifications");
+  if (enable && useBrowser && Notification.permission === "default") {
+    enable.hidden = false;
+    enable.addEventListener("click", () => Notification.requestPermission().then(() => { enable.hidden = true; }));
+  }
+
   async function check() {
     try {
-      const r = await fetch("/status", { cache: "no-store" });
+      const r = await fetch(`/status?after=${lastNotice}`, { cache: "no-store" });
       if (!r.ok) return;
       const s = await r.json();
+      showUnread(s.unread);
+      for (const n of s.notices || []) {
+        lastNotice = Math.max(lastNotice, n.id);
+        if (useBrowser && Notification.permission === "granted") {
+          const note = new Notification(n.title, { body: n.text, tag: `wft-${n.id}` });
+          note.onclick = () => { window.focus(); location.href = n.url; };
+        }
+      }
       if (s.version === seen.version && s.read_only === seen.read_only && s.conflicts === seen.conflicts) return;
       if (dirty) document.getElementById("updates").hidden = false;
       else location.reload();

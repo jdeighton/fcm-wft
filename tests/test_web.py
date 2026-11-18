@@ -92,7 +92,7 @@ def test_state_changes_need_same_origin(services):
 def test_status_endpoint_tracks_changes(services):
     client = client_for(services)
     before = client.get("/status").json()
-    assert before == {"version": 0, "read_only": False, "conflicts": 0}
+    assert before == {"version": 0, "read_only": False, "conflicts": 0, "unread": 0, "notices": []}
     services.create_request(DEMO, "x")
     assert client.get("/status").json()["version"] == 1
 
@@ -439,3 +439,22 @@ def test_family_pages(share, tmp_path, family_registry):
     [child] = bob.children(rid)
     child_page = bob_client.get(f"/requests/{child.request_id}").text
     assert "Sub-request of" in child_page and f"/requests/{rid}#step-accounts" in child_page
+
+
+def test_notifications_page_badge_title_and_status(share, tmp_path, registry):
+    from tests.conftest import make_services
+    alice = make_services(share, tmp_path / "na.sqlite", registry, "alice")
+    bob = make_services(share, tmp_path / "nb.sqlite", registry, "bob")
+    rid = bob.create_request(DEMO, "For alice")
+    bob.change_owner(rid, "alice")
+    alice.sync()
+    client = client_for(alice)
+    page = client.get("/").text
+    assert "<title>(1) [UAT]" in page and 'id="unread-badge">1<' in page
+    status = client.get("/status?after=0").json()
+    assert status["unread"] == 1 and status["notices"] == []  # `after=0`: no backlog for browser toasts
+    status = client.get("/status?after=-1").json()
+    assert [n["text"] for n in status["notices"]] == ["bob made you the owner of For alice"]
+    assert "bob made you the owner" in client.get("/notifications").text
+    client.get(f"/requests/{rid}")  # viewing it marks it read
+    assert client.get("/status").json()["unread"] == 0

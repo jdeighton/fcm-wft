@@ -18,7 +18,7 @@ ENV_MARKER = Path("meta") / "environment"
 # Every key an env file may contain; keep `.env.example` in step.
 SUPPORTED_KEYS = ("WFT_SHARE_ROOT", "WFT_PORT", "WFT_DEFINITIONS_DIR",
                   "WFT_TT_BASE_URL", "WFT_TT_ENVIRONMENT", "WFT_TT_APP_KEY", "WFT_TT_APP_SECRET",
-                  "WFT_TT_APP_NAME", "WFT_TT_COMPANY", "WFT_TT_CACHE_MINUTES")
+                  "WFT_TT_APP_NAME", "WFT_TT_COMPANY", "WFT_TT_CACHE_MINUTES", "WFT_NOTIFICATIONS")
 SECRET_KEYS = ("WFT_TT_APP_KEY", "WFT_TT_APP_SECRET")  # never shown in messages or logs
 FAKE_TT = "fake:"
 
@@ -37,6 +37,11 @@ class Config:
     tt: TTSettings | None = None  # None: TT not configured (lookups fall back to typing)
     tt_fake: bool = False         # WFT_TT_BASE_URL=fake: uses sample data instead of TT
     picklist_ttl_minutes: float = 60.0
+    notifications: str = ""  # windows | browser | off; empty: windows on Windows, else browser
+
+    @property
+    def last_online_path(self) -> Path:
+        return self.home / f"last-online-{self.env}.json"
 
     @property
     def picklist_cache_path(self) -> Path:
@@ -128,8 +133,12 @@ def load_config(env: str, home: Path | None = None,
         ttl = float(values.get("WFT_TT_CACHE_MINUTES", "60"))
     except ValueError as e:
         raise ConfigError(f"WFT_TT_CACHE_MINUTES must be a number in {env_file}") from e
+    notifications = values.get("WFT_NOTIFICATIONS", "").strip().lower()
+    if notifications not in ("", "windows", "browser", "off"):
+        raise ConfigError(f"WFT_NOTIFICATIONS must be windows, browser or off in {env_file}")
     return Config(env=env, share_root=Path(share_root), port=port, home=home,
-                  definitions_dir=definitions_dir, tt=tt, tt_fake=tt_fake, picklist_ttl_minutes=ttl)
+                  definitions_dir=definitions_dir, tt=tt, tt_fake=tt_fake, picklist_ttl_minutes=ttl,
+                  notifications=notifications)
 
 
 def _tt_settings(values: dict[str, str], env_file: Path) -> tuple[TTSettings | None, bool]:

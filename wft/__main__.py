@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import logging
 import socket
 import sys
@@ -21,6 +22,7 @@ from wft.configfiles import (DEFAULT_REASONS, REASONS_NAME, REPO_CONFIG_DIR, SHA
                              parse_reasons)
 from wft.adapters.fake import FakeTT
 from wft.adapters.tt import TTAdapter
+from wft.notifications import make_notifier
 from wft.services import Services
 from wft.team import REPO_ROLES_FILE, ROLES_FILE, TeamSource
 from wft.web import security
@@ -42,6 +44,19 @@ def bind_socket(preferred_port: int) -> socket.socket:
         except OSError:
             sock.close()
     raise OSError("No free port available")
+
+
+def _exit_cleanly_on_signals() -> None:
+    """Turn termination (and, on Windows, closing the console window) into a normal exit, so the
+    instance lock is released instead of blocking a restart until it goes stale."""
+    def stop(signum, frame):
+        raise SystemExit(0)
+    for name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), stop)
+            except (ValueError, OSError):
+                pass
 
 
 def build_adapters(config) -> dict:
@@ -71,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"WFT: {e}", file=sys.stderr)
         return 2
 
+    _exit_cleanly_on_signals()
     user, host = default_identity()
     lock = InstanceLock(config.share_root / "instance-locks" / f"{user}.lock", user, host)
     try:
@@ -101,10 +117,12 @@ def main(argv: list[str] | None = None) -> int:
                             attachments=AttachmentStore(config.share_root, MAX_ATTACHMENT_BYTES),
                             adapters=build_adapters(config),
                             picklists=PicklistCache(config.picklist_cache_path, config.picklist_ttl_minutes * 60),
-                            reasons=reasons)
+                            reasons=reasons, notifier=make_notifier(config.notifications, config.env),
+                            last_online_path=config.last_online_path)
         services.sync()
         services.start_polling()
-        app = create_app(services, config.env, token, port)
+        app = create_app(services, config.env, token, port,
+                         browser_notifications=(config.notifications or ("windows" if sys.platform == "win32" else "browser")) == "browser")
 
         url = f"http://{HOST}:{port}{security.AUTH_PATH}?token={token}"
         if port != config.port:
