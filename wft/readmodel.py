@@ -5,7 +5,7 @@ Deleting the cache file is always safe; the next start re-ingests every journal.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import logging
 import sqlite3
 import threading
@@ -51,14 +51,31 @@ CREATE TABLE IF NOT EXISTS off_process (
     performed_on TEXT NOT NULL,
     state_json   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notices (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    read       INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS journal_cursor (
     journal TEXT PRIMARY KEY,
     offset  INTEGER NOT NULL
 );
 """
-TABLES = ("events", "requests", "conflicts", "off_process", "journal_cursor")
+TABLES = ("events", "requests", "conflicts", "off_process", "notices", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 10
+CACHE_VERSION = 11
+
+
+@dataclass(frozen=True)
+class Change:
+    request_id: str
+    before: RequestState | None
+    after: RequestState
+    new_events: list[Event]
 
 
 class ReadModel:
@@ -74,22 +91,35 @@ class ReadModel:
         self._lock = threading.Lock()
         self.registry = registry
 
-    def ingest(self, events: Iterable[Event], cursor: dict[str, int] | None = None) -> set[str]:
-        """Store events not seen before, re-project the requests they touch, and save the read cursor."""
+    def ingest(self, events: Iterable[Event], cursor: dict[str, int] | None = None,
+               changes: list[Change] | None = None) -> set[str]:
+        """Store events not seen before, re-project the requests they touch, and save the read cursor.
+
+        If `changes` is given, a Change (state before and after, and the new events) is appended for
+        each request touched, so callers can tell people what changed.
+        """
         with self._lock, self._db:
             touched = set()
+            new_events: dict[str, list[Event]] = {}
             for e in events:
                 cur = self._db.execute(
                     "INSERT OR IGNORE INTO events (event_id, request_id, seq, ts, line) VALUES (?,?,?,?,?)",
                     (e.event_id, e.request_id, e.seq, e.ts, e.to_line()))
                 if cur.rowcount:
                     touched.add(e.request_id)
+                    new_events.setdefault(e.request_id, []).append(e)
+            before = {rid: self._get(rid) for rid in touched} if changes is not None else {}
             # Requests whose definition wasn't loaded yet when their events arrived get another try.
             unprojected = {r[0] for r in self._db.execute(
                 "SELECT DISTINCT request_id FROM events WHERE request_id NOT IN (SELECT request_id FROM requests)"
                 " AND request_id NOT IN (SELECT record_id FROM off_process)")}
             for request_id in touched | unprojected:
                 self._project(request_id)
+            if changes is not None:
+                for rid in touched:
+                    after = self._get(rid)
+                    if after is not None:
+                        changes.append(Change(rid, before.get(rid), after, new_events.get(rid, [])))
             if cursor is not None:
                 self._db.executemany("INSERT OR REPLACE INTO journal_cursor VALUES (?, ?)", cursor.items())
             return touched
@@ -147,8 +177,38 @@ class ReadModel:
 
     def get(self, request_id: str) -> RequestState | None:
         with self._lock:
-            row = self._db.execute("SELECT state_json FROM requests WHERE request_id = ?", (request_id,)).fetchone()
+            return self._get(request_id)
+
+    def _get(self, request_id: str) -> RequestState | None:
+        row = self._db.execute("SELECT state_json FROM requests WHERE request_id = ?", (request_id,)).fetchone()
         return _load_state(row[0]) if row else None
+
+    # --- notices (per user, local) ---------------------------------------------
+
+    def add_notices(self, notices) -> None:
+        with self._lock, self._db:
+            self._db.executemany("INSERT INTO notices (ts, request_id, kind, title, text) VALUES (?,?,?,?,?)",
+                                 [(n.ts, n.request_id, n.kind, n.title, n.text) for n in notices])
+
+    def notices(self, unread_only: bool = False, limit: int = 200, after_id: int = 0) -> list[dict]:
+        sql = "SELECT id, ts, request_id, kind, title, text, read FROM notices WHERE id > ?"
+        if unread_only:
+            sql += " AND read = 0"
+        with self._lock:
+            rows = self._db.execute(sql + " ORDER BY id DESC LIMIT ?", (after_id, limit)).fetchall()
+        keys = ("id", "ts", "request_id", "kind", "title", "text", "read")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def unread_count(self) -> int:
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM notices WHERE read = 0").fetchone()[0]
+
+    def mark_read(self, request_id: str | None = None) -> None:
+        with self._lock, self._db:
+            if request_id:
+                self._db.execute("UPDATE notices SET read = 1 WHERE request_id = ?", (request_id,))
+            else:
+                self._db.execute("UPDATE notices SET read = 1")
 
     def list_requests(self, status: str | None = None) -> list[RequestState]:
         sql, args = "SELECT state_json FROM requests", ()

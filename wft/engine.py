@@ -310,7 +310,7 @@ def _friendly(e: jsonschema.ValidationError) -> str:
 # --- commands -------------------------------------------------------------
 
 def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = None,
-                   parent: dict | None = None) -> NewEvent:
+                   parent: dict | None = None, owner: str | None = None) -> NewEvent:
     title = title.strip()
     if not title:
         raise CommandError("A title is required")
@@ -320,6 +320,8 @@ def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = Non
     if parent:
         payload["parent"] = parent
         payload["auto"] = True
+    if owner:
+        payload["owner"] = owner
     return NewEvent(REQUEST_CREATED, seq=1, payload=payload)
 
 
@@ -909,7 +911,7 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         return RequestState(
             request_id=event.request_id, workflow=defn.key, title=event.payload["title"],
             status=DRAFT, created_by=event.actor, created_at=event.ts, updated_at=event.ts,
-            seq=event.seq, last_event=event.event_id, owner=event.actor,
+            seq=event.seq, last_event=event.event_id, owner=event.payload.get("owner") or event.actor,
             steps=tuple(StepState(s.id, PENDING) for s in defn.steps),
             follow_up_of=event.payload.get("follow_up_of"), parent=event.payload.get("parent"),
         )
