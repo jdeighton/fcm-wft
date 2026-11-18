@@ -13,3 +13,10 @@ Default labels: needs-triage, needs-info, ready-for-agent, ready-for-human, wont
 ### Domain docs
 
 Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Development
+
+- Python ≥ 3.11. Create a venv and install `requirements-dev.txt` (from Artifactory on firm machines).
+- Run tests: `python -m pytest`
+- Run locally: put a `uat.env` (see `.env.example`) in `%USERPROFILE%\.wft\` (or the folder named by `WFT_HOME`), then `python -m wft --env uat`.
+- The engine (`wft/engine.py`) must stay pure: no I/O, clocks or id generation. Storage goes through the `Repository` interface.

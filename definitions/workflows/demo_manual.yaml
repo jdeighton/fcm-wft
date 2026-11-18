@@ -1,0 +1,12 @@
+# Trivial one-step workflow used to prove the end-to-end path (issue #1).
+id: demo_manual
+version: 1
+title: Demo manual checklist
+steps:
+  - id: do_the_thing
+    type: manual
+    title: Do the thing
+    checklist:
+      - Read the request
+      - Make the change
+      - Check the change
