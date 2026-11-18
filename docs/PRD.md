@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Draft v0.1 |
 | **Date** | 2026-11-18 |
-| **Owner** | TBD |
+| **Owner** | James Deighton |
 | **Maintainers** | Team of 3 (named in [§12](#12-ownership--support)) |
 | **Release covered** | Release 1 (MVP) — TT only |
 
