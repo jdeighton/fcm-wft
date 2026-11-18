@@ -25,8 +25,13 @@ def test_create_tick_and_complete_through_ui(services):
     r = client.post("/requests", data={"workflow": DEMO, "title": "Add user jdoe"}, follow_redirects=False)
     assert r.status_code == 303
     rid = r.headers["location"].rsplit("/", 1)[1]
+    draft = client.get(r.headers["location"]).text
+    assert "status-draft" in draft and "Submit" in draft
+    assert client.post(f"/requests/{rid}/steps/do_the_thing/complete").status_code == 409  # still a Draft
+    assert client.post(f"/requests/{rid}/submit", follow_redirects=False).status_code == 303
+    assert "REQ-" in client.get(f"/requests/{rid}").text
 
-    assert client.post(f"/requests/{rid}/steps/do_the_thing/complete").status_code == 409
+    assert client.post(f"/requests/{rid}/steps/do_the_thing/complete").status_code == 409  # items unticked
 
     for i in range(3):
         client.post(f"/requests/{rid}/steps/do_the_thing/checklist/{i}", data={"checked": "true"})
@@ -121,6 +126,7 @@ def test_conflict_banner_and_dismiss(services, share, tmp_path, registry):
     services._acknowledged_path = tmp_path / "ack.json"
     bob = make_services(share, tmp_path / "bob.sqlite", registry, "bob")
     rid = services.create_request(DEMO, "Contested")
+    services.submit(rid, {})
     bob.sync()
     bob.set_checklist_item(rid, "do_the_thing", 0, True)
     services.set_checklist_item(rid, "do_the_thing", 1, True)  # alice hadn't seen bob's tick
@@ -132,3 +138,55 @@ def test_conflict_banner_and_dismiss(services, share, tmp_path, registry):
     r = client.post(f"/conflicts/{c.event_id}/dismiss", headers={"Referer": f"{ORIGIN}/"}, follow_redirects=False)
     assert r.status_code == 303
     assert "was overridden" not in client.get("/").text
+
+
+def forms_client(share, tmp_path, forms_registry):
+    from tests.conftest import make_services
+    svc = make_services(share, tmp_path / "f.sqlite", forms_registry)
+    return svc, client_for(svc)
+
+
+def test_draft_form_save_submit_with_errors_then_success(share, tmp_path, forms_registry):
+    svc, client = forms_client(share, tmp_path, forms_registry)
+    rid = client.post("/requests", data={"workflow": "limits@1", "title": "ACC1"},
+                      follow_redirects=False).headers["location"].rsplit("/", 1)[1]
+    page = client.get(f"/requests/{rid}").text
+    assert 'name="capture.account"' in page and 'name="capture.limits.max"' in page and "Save draft" in page
+
+    r = client.post(f"/requests/{rid}/forms", data={"_action": "save", "capture.account": "ACC1"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and svc.get(rid)[0].step("capture").draft == {"account": "ACC1"}
+
+    bad = client.post(f"/requests/{rid}/forms", data={"_action": "submit", "capture.account": "ACC1",
+                                                      "capture.limits.max": "lots"})
+    assert bad.status_code == 422
+    assert "Enter a number" in bad.text and 'value="lots"' in bad.text and 'value="ACC1"' in bad.text
+    assert 'data-autorefresh="false"' in bad.text  # never auto-reload (and re-POST) an error page
+    assert 'data-autorefresh="true"' in client.get(f"/requests/{rid}").text
+    assert svc.get(rid)[0].status == "Draft"
+
+    ok = client.post(f"/requests/{rid}/forms", data={"_action": "submit", "capture.account": "ACC1",
+                                                     "capture.limits.max": "10"})
+    assert ok.status_code == 200 and "LIM-" in ok.text and "Max position" in ok.text
+    state = svc.get(rid)[0]
+    assert state.status == "Active" and state.inputs == {"account": "ACC1", "limits": {"max": 10}}
+    assert state.reference in client.get("/").text
+
+
+def test_ready_form_step_and_notes(share, tmp_path, forms_registry):
+    svc, client = forms_client(share, tmp_path, forms_registry)
+    rid = svc.create_request("limits@1", "x")
+    svc.submit(rid, {"capture": {"account": "A", "limits": {"max": 1}}})
+    svc.set_checklist_item(rid, "apply", 0, True)
+    svc.complete_step(rid, "apply")
+    page = client.get(f"/requests/{rid}").text
+    assert 'name="record.ticket"' in page and 'name="_step" value="record"' in page
+    bad = client.post(f"/requests/{rid}/forms", data={"_step": "record", "_action": "submit"})
+    assert bad.status_code == 422 and "Required" in bad.text
+    client.post(f"/requests/{rid}/forms", data={"_step": "record", "_action": "submit", "record.ticket": "K-9"})
+    assert svc.get(rid)[0].status == "Completed"
+
+    r = client.post(f"/requests/{rid}/notes", data={"text": "Done & dusted <b>"}, follow_redirects=False)
+    assert r.status_code == 303
+    page = client.get(f"/requests/{rid}").text
+    assert "Done &amp; dusted &lt;b&gt;" in page and "note added" in page

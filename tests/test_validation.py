@@ -161,11 +161,32 @@ def test_consumes_without_inputs_schema(tmp_path):
     assert has(errors(tmp_path, d), "no inputs_schema")
 
 
-def test_sample_inputs_required_and_checked(tmp_path):
-    d = wf(inputs_schema="in.schema.json")
-    assert has(errors(tmp_path, d, files={"schemas/in.schema.json": INPUTS}), "no sample at samples/simple.yaml")
-    errs = errors(tmp_path / "2", d, files={"schemas/in.schema.json": INPUTS, "samples/simple.yaml": {"limits": {}}})
-    assert has(errs, "'account' is a required property")
+def with_capture(**changes):
+    d = wf(inputs_schema="in.schema.json", **changes)
+    d["steps"].insert(0, {"id": "capture", "type": "form", "schema": "in.schema.json"})
+    d["steps"][1]["depends_on"] = ["capture"]
+    return d
+
+
+def test_form_steps_need_samples_that_match_their_schema(tmp_path):
+    d = with_capture()
+    files = {"schemas/in.schema.json": INPUTS}
+    assert has(errors(tmp_path, d, files=files), "form steps need sample data at samples/simple.yaml")
+    errs = errors(tmp_path / "2", d, files={**files, "samples/simple.yaml": {"capture": {"limits": {}}, "a": {}}})
+    assert has(errs, "capture: 'account' is a required property")
+    assert has(errs, "'a' is not a form step")
+    assert errors(tmp_path / "3", d, files={**files, "samples/simple.yaml": {"capture": {"account": "A"}}}) == []
+
+
+def test_inputs_schema_needs_an_initial_form(tmp_path):
+    assert has(errors(tmp_path, wf(inputs_schema="in.schema.json"), files={"schemas/in.schema.json": INPUTS}),
+               "no initial form step")
+
+
+def test_form_schema_must_be_an_object(tmp_path):
+    d = with_capture()
+    files = {"schemas/in.schema.json": {"type": "string"}, "samples/simple.yaml": {"capture": "x"}}
+    assert has(errors(tmp_path, d, files=files), 'a form schema must have "type": "object"')
 
 
 def test_expressions_are_checked(tmp_path):

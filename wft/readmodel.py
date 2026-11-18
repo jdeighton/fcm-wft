@@ -13,7 +13,7 @@ from typing import Iterable
 
 from wft import engine
 from wft.definitions import DefinitionRegistry
-from wft.engine import RequestState, StepState
+from wft.engine import Note, RequestState, StepState
 from wft.events import Event
 
 log = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS journal_cursor (
 """
 TABLES = ("events", "requests", "conflicts", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 class ReadModel:
@@ -136,11 +136,12 @@ class ReadModel:
         return [_load_state(r[0]) for r in rows]
 
     def history(self, request_id: str) -> list[Event]:
-        """The winning chain of events for a request, in order."""
+        """The winning chain of events plus notes and references, in time order."""
         with self._lock:
             rows = self._db.execute("SELECT line FROM events WHERE request_id = ?", (request_id,)).fetchall()
-        chain, _ = engine.resolve(Event.from_line(r[0]) for r in rows)
-        return chain
+        events = [Event.from_line(r[0]) for r in rows]
+        chain, _ = engine.resolve(events)
+        return sorted(chain + engine.annotations(events), key=lambda e: (e.ts, e.seq, e.event_id))
 
     def conflicts_for(self, actor: str) -> list[Event]:
         """Actions by `actor` that were overridden by someone else's concurrent action."""
@@ -158,13 +159,15 @@ class ReadModel:
 
 
 def _dump_state(state: RequestState) -> str:
-    d = {k: getattr(state, k) for k in state.__dataclass_fields__ if k != "steps"}
+    d = {k: getattr(state, k) for k in state.__dataclass_fields__ if k not in ("steps", "notes")}
     d["steps"] = [{**{k: getattr(s, k) for k in s.__dataclass_fields__}, "ticked": sorted(s.ticked)}
                   for s in state.steps]
+    d["notes"] = [{"ts": n.ts, "actor": n.actor, "text": n.text} for n in state.notes]
     return json.dumps(d, sort_keys=True)
 
 
 def _load_state(text: str) -> RequestState:
     d = json.loads(text)
     d["steps"] = tuple(StepState(**{**s, "ticked": frozenset(s["ticked"])}) for s in d["steps"])
+    d["notes"] = tuple(Note(**n) for n in d["notes"])
     return RequestState(**d)

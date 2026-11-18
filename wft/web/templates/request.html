@@ -1,19 +1,70 @@
 {% extends "base.html" %}
-{% block title %}{{ req.title }}{% endblock %}
+{% from "_form.html" import field, readonly %}
+{% block title %}{{ req.reference or req.title }}{% endblock %}
+{# A page showing form errors is the response to a POST: never auto-reload it. #}
+{% block autorefresh %}{{ 'false' if form_errors else 'true' }}{% endblock %}
 {% block content %}
 <p><a href="/">← All requests</a></p>
 <section class="card">
-  <h1>{{ req.title }} <span class="status status-{{ req.status | lower }}">{{ req.status }}</span></h1>
-  <p class="muted">{{ defn.title }} ({{ req.workflow }}) · created by {{ req.created_by }} at {{ req.created_at }}</p>
+  <h1>
+    {% if req.reference %}<span class="ref">{{ req.reference }}</span>{% endif %}
+    {{ req.title }} <span class="status status-{{ req.status | lower }}">{{ req.status }}</span>
+  </h1>
+  <p class="muted">
+    {{ defn.title }} ({{ req.workflow }}) · created by {{ req.created_by }} at {{ req.created_at[:16] | replace("T", " ") }} UTC
+    {% if req.submitted_at %}· submitted by {{ req.submitted_by }} at {{ req.submitted_at[:16] | replace("T", " ") }} UTC{% endif %}
+    {% if req.status != "Draft" and not req.reference %}· reference pending{% endif %}
+  </p>
 </section>
 
+{% if req.status == "Draft" %}
+<section class="card draft">
+  <h2>Draft</h2>
+  {% if editable %}
+  <p class="muted">Fill in the details. <strong>Save draft</strong> keeps your progress; <strong>Submit</strong> checks the form and starts the request.</p>
+  {% if form_errors %}<p class="field-error" role="alert">Some fields need attention. See below.</p>{% endif %}
+  <form method="post" action="/requests/{{ req.request_id }}/forms" class="form" novalidate>
+    {% for sd in editable %}
+      {% if editable | length > 1 %}<h3>{{ sd.title }}</h3>{% endif %}
+      {% for f in forms[sd.id] %}{{ field(f) }}{% endfor %}
+    {% endfor %}
+    <div class="actions">
+      <button type="submit" name="_action" value="save" class="secondary">Save draft</button>
+      <button type="submit" name="_action" value="submit">Submit</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">This workflow has no initial form. Submit to start it.</p>
+  <form method="post" action="/requests/{{ req.request_id }}/submit"><button type="submit">Submit</button></form>
+  {% endif %}
+</section>
+{% endif %}
+
 {% for s in req.steps %}{% set sd = defn.step(s.id) %}
+{% if not (req.status == "Draft" and sd in editable) %}
 <section class="card step step-{{ s.status }}">
   <h2>{{ sd.title }} <span class="step-status">{{ s.status }}</span></h2>
+  {% if sd.type == "form" %}
+    {% if s.status == "ready" and req.status == "Active" %}
+    {% if form_errors.get(s.id) %}<p class="field-error" role="alert">Some fields need attention.</p>{% endif %}
+    <form method="post" action="/requests/{{ req.request_id }}/forms" class="form" novalidate>
+      <input type="hidden" name="_step" value="{{ s.id }}">
+      {% for f in forms[s.id] %}{{ field(f) }}{% endfor %}
+      <div class="actions">
+        <button type="submit" name="_action" value="save" class="secondary">Save</button>
+        <button type="submit" name="_action" value="submit">Submit</button>
+      </div>
+    </form>
+    {% elif s.data is not none %}
+    {{ readonly(forms[s.id]) }}
+    {% else %}
+    <p class="muted">Not filled in yet.</p>
+    {% endif %}
+  {% else %}
   <ul class="checklist">
   {% for item in sd.checklist %}{% set done = loop.index0 in s.ticked %}
     <li>
-      {% if s.status == "ready" %}
+      {% if s.status == "ready" and req.status == "Active" %}
       <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/checklist/{{ loop.index0 }}">
         <input type="hidden" name="checked" value="{{ 'false' if done else 'true' }}">
         <button type="submit" class="tick" aria-pressed="{{ 'true' if done else 'false' }}">{{ "☑" if done else "☐" }}</button>
@@ -25,23 +76,41 @@
     </li>
   {% endfor %}
   </ul>
-  {% if s.status == "ready" %}
+  {% if s.status == "ready" and req.status == "Active" %}
   <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/complete">
     <button type="submit" {% if s.ticked | length < sd.checklist | length %}disabled{% endif %}>Complete step</button>
   </form>
-  {% elif s.status == "done" %}
-  <p class="muted">Completed by {{ s.completed_by }} at {{ s.completed_at }}</p>
+  {% endif %}
+  {% endif %}
+  {% if s.status == "done" %}
+  <p class="muted">Completed by {{ s.completed_by }} at {{ s.completed_at[:16] | replace("T", " ") }} UTC</p>
   {% endif %}
 </section>
+{% endif %}
 {% endfor %}
+
+<section class="card" id="notes">
+  <h2>Notes</h2>
+  {% for n in req.notes %}
+  <div class="note"><p class="muted small">{{ n.actor }} · {{ n.ts[:16] | replace("T", " ") }} UTC</p><p>{{ n.text }}</p></div>
+  {% else %}
+  <p class="muted">No notes yet.</p>
+  {% endfor %}
+  <form method="post" action="/requests/{{ req.request_id }}/notes" class="note-form">
+    <label for="note-text">Add a note</label>
+    <textarea id="note-text" name="text" rows="3" maxlength="4000" required></textarea>
+    <div class="actions"><button type="submit">Add note</button></div>
+  </form>
+</section>
 
 <section class="card">
   <h2>History</h2>
   <table>
-    <thead><tr><th>#</th><th>Time (UTC)</th><th>Who</th><th>Event</th><th>Details</th></tr></thead>
+    <thead><tr><th>Time (UTC)</th><th>Who</th><th>Event</th><th>Details</th></tr></thead>
     <tbody>
     {% for e in history %}
-      <tr><td>{{ e.seq }}</td><td>{{ e.ts }}</td><td>{{ e.actor }}</td><td>{{ e.type }}</td><td><code>{{ e.payload | tojson }}</code></td></tr>
+      <tr><td>{{ e.ts[:19] | replace("T", " ") }}</td><td>{{ e.actor }}</td><td>{{ e.type | replace("_", " ") }}</td>
+          <td>{% if e.type == "note_added" %}{{ e.payload.text }}{% elif e.type == "reference_assigned" %}{{ e.payload.reference }}{% else %}<code>{{ e.payload | tojson }}</code>{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>

@@ -108,7 +108,7 @@ def validate_repo(definitions_dir: Path, share_root: Path | None = None,
         if any(lvl == "error" for lvl, _ in issues):
             continue
         defn = parse_workflow(data, definitions_dir)
-        report.issues += [Issue(source, m) for m in dry_run(defn)]
+        report.issues += [Issue(source, m) for m in dry_run(defn, load_samples(definitions_dir, wid) or {})]
         if share_root is not None:
             report.issues += [Issue(source, m) for m in check_version_bump(path, definitions_dir, data, share_root)]
     return report
@@ -172,6 +172,9 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
             if ref.startswith("schemas/"):
                 schema = json.loads(path.read_text(encoding="utf-8"))
                 jsonschema.Draft202012Validator.check_schema(schema)
+                if any(s.get("schema") and f"schemas/{s['schema']}" == ref for s in data["steps"]) \
+                        and schema.get("type") != "object":
+                    err(f"{ref}: a form schema must have \"type\": \"object\"")
                 if ref == f"schemas/{data.get('inputs_schema')}":
                     inputs_schema = schema
             elif ref.startswith("checklists/"):
@@ -227,21 +230,48 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
             elif root == "item" and not any(s.get("for_each") for s in steps):
                 err(f"{where}: `item` is only available in a for_each sub-workflow step")
 
-    # Sample inputs for the dry run
-    sample = base / "samples" / f"{data['id']}.yaml"
-    if inputs_schema is not None:
-        if not sample.is_file():
-            err(f"inputs_schema is set but there is no sample at samples/{data['id']}.yaml for the dry run")
-        else:
-            sample_data = yaml.safe_load(sample.read_text(encoding="utf-8"))
-            for e in jsonschema.Draft202012Validator(inputs_schema).iter_errors(sample_data):
-                err(f"samples/{data['id']}.yaml: {_where(e.absolute_path)}{e.message}")
+    # Sample data for the dry run: samples/<id>.yaml maps each form step id to sample form data.
+    form_steps = [s for s in steps if s["type"] == "form"]
+    sample_path = f"samples/{data['id']}.yaml"
+    samples = load_samples(base, data["id"])
+    if form_steps and samples is None:
+        err(f"form steps need sample data at {sample_path} for the dry run")
+    elif samples is not None:
+        if not isinstance(samples, dict):
+            err(f"{sample_path} must map form step ids to sample data")
+            samples = {}
+        for extra in sorted(set(samples) - {s["id"] for s in form_steps}):
+            err(f"{sample_path}: {extra!r} is not a form step")
+        for s in form_steps:
+            if s["id"] not in samples:
+                err(f"{sample_path}: no sample for form step {s['id']!r}")
+                continue
+            schema_path = base / "schemas" / s["schema"]
+            if schema_path.is_file():
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                for e in jsonschema.Draft202012Validator(schema).iter_errors(samples[s["id"]]):
+                    err(f"{sample_path}: {s['id']}: {_where(e.absolute_path)}{e.message}")
+        if inputs_schema is not None:
+            merged = {}
+            for s in form_steps:
+                if not s.get("depends_on") and isinstance(samples.get(s["id"]), dict):
+                    merged.update(samples[s["id"]])
+            for e in jsonschema.Draft202012Validator(inputs_schema).iter_errors(merged):
+                err(f"{sample_path}: inputs from the initial form(s) don't match {data['inputs_schema']}: "
+                    f"{_where(e.absolute_path)}{e.message}")
+    if inputs_schema is not None and not any(not s.get("depends_on") for s in form_steps):
+        err("inputs_schema is set but there is no initial form step (a form with no depends_on) to capture inputs")
 
     try:
         parse_workflow(data, base)
     except DefinitionError as e:
         err(str(e))
     return out
+
+
+def load_samples(base: Path, workflow_id: str) -> Any:
+    path = base / "samples" / f"{workflow_id}.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
 def _routes(step: dict) -> Iterator[tuple[str, str]]:
@@ -352,7 +382,7 @@ def _schema_messages(e: jsonschema.ValidationError) -> list[str]:
 
 # --- dry run -----------------------------------------------------------------
 
-def dry_run(defn: WorkflowDef) -> list[str]:
+def dry_run(defn: WorkflowDef, samples: dict | None = None) -> list[str]:
     """Walk every path through the workflow with the real engine; report dead ends and steps never reached."""
     problems: list[str] = []
     counter = iter(range(10**9))
@@ -369,9 +399,9 @@ def dry_run(defn: WorkflowDef) -> list[str]:
     todo: list[tuple[engine.RequestState, list[str]]] = [(start, [])]
     while todo:
         state, labels = todo.pop()
-        options = engine.actions(state, defn)
+        options = engine.actions(state, defn, samples)
         if not options:
-            if state.status == engine.ACTIVE:
+            if state.status in (engine.ACTIVE, engine.DRAFT):
                 stuck = [s.id for s in state.steps if s.status != engine.DONE]
                 problems.append(f"dry run: path [{', '.join(labels) or 'start'}] gets stuck with "
                                 f"steps {', '.join(stuck)} unfinished")

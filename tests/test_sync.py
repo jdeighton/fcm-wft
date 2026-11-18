@@ -19,6 +19,7 @@ def pair(share, tmp_path, registry):
 def test_concurrent_writers_converge(pair):
     alice, bob = pair
     rid = alice.create_request(DEMO, "Shared")
+    alice.submit(rid, {})
     bob.sync()
     errors = []
 
@@ -47,6 +48,7 @@ def test_concurrent_writers_converge(pair):
 def test_losing_author_sees_conflict_until_dismissed_even_after_rebuild(pair):
     alice, bob = pair
     rid = alice.create_request(DEMO, "Shared")
+    alice.submit(rid, {})
     bob.sync()
     alice.set_checklist_item(rid, "do_the_thing", 0, True)
     bob.set_checklist_item(rid, "do_the_thing", 1, True)  # bob hadn't seen alice's tick
@@ -70,6 +72,7 @@ def test_losing_author_sees_conflict_until_dismissed_even_after_rebuild(pair):
 def test_share_loss_goes_read_only_and_recovers(pair, share):
     alice, _ = pair
     rid = alice.create_request(DEMO, "Before outage")
+    alice.submit(rid, {})
     hidden = share.with_name("share-offline")
     share.rename(hidden)
     try:
@@ -93,6 +96,7 @@ def test_share_loss_goes_read_only_and_recovers(pair, share):
 def test_share_lost_during_write_goes_read_only(pair, monkeypatch):
     alice, _ = pair
     rid = alice.create_request(DEMO, "x")
+    alice.submit(rid, {})
 
     def broken(event):
         raise OSError("The network path was not found")
@@ -108,6 +112,7 @@ def test_poller_picks_up_other_users_changes(pair):
     bob.start_polling(every=0.05)
     try:
         rid = alice.create_request(DEMO, "Polled")
+        alice.submit(rid, {})
         for _ in range(100):
             if bob.rm.get(rid):
                 break

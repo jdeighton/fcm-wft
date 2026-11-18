@@ -216,3 +216,61 @@ def default_identity() -> tuple[str, str]:
     """(Windows username, host name) for this instance."""
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
     return user.lower(), socket.gethostname()
+
+
+class ReferenceUnavailable(Exception):
+    """A readable reference couldn't be allocated right now (lock busy or share unavailable)."""
+
+
+class ReferenceAllocator:
+    """Hands out readable references `PREFIX-YYYY-NNNN` from counters on the share.
+
+    Each prefix/year has a counter file under `meta/references/`, updated while
+    holding a short-lived lock file created with O_EXCL. A crash after bumping
+    the counter can skip a number, but a number is never handed out twice.
+    """
+
+    def __init__(self, share_root: Path, wait: float = 5.0, stale_after: float = 30.0):
+        self.root = share_root
+        self.wait = wait
+        self.stale_after = stale_after
+
+    def allocate(self, prefix: str, year: int) -> str:
+        if not self.root.is_dir():
+            raise ReferenceUnavailable(f"Share not reachable: {self.root}")
+        lock = self.root / "locks" / f"reference-{prefix}-{year}.lock"
+        counter = self.root / "meta" / "references" / f"{prefix}-{year}.txt"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.wait
+        while True:
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - lock.stat().st_mtime > self.stale_after:
+                        lock.unlink(missing_ok=True)  # left behind by a crash mid-allocation
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise ReferenceUnavailable(f"Reference counter {prefix}-{year} is busy; will retry") from None
+                time.sleep(0.05)
+            except OSError as e:
+                raise ReferenceUnavailable(f"Can't lock reference counter: {e}") from e
+        try:
+            os.close(fd)
+            try:
+                last = int(counter.read_text(encoding="utf-8").strip() or 0)
+            except FileNotFoundError:
+                last = 0
+            number = last + 1
+            tmp = counter.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(str(number), encoding="utf-8")
+            os.replace(tmp, counter)
+            return f"{prefix}-{year}-{number:04d}"
+        except (OSError, ValueError) as e:
+            raise ReferenceUnavailable(f"Can't update reference counter {counter}: {e}") from e
+        finally:
+            lock.unlink(missing_ok=True)

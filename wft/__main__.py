@@ -13,7 +13,8 @@ import uvicorn
 from wft.config import ENVIRONMENTS, ConfigError, check_share_marker, load_config
 from wft.definitions import DefinitionRegistry
 from wft.readmodel import ReadModel
-from wft.repository import FileRepository, InstanceLock, InstanceLockError, default_identity
+from wft.repository import (FileRepository, InstanceLock, InstanceLockError, ReferenceAllocator,
+                            default_identity)
 from wft.services import Services
 from wft.web import security
 from wft.web.app import create_app
@@ -72,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
             registry = DefinitionRegistry.from_share(config.share_root)
         read_model = ReadModel(config.cache_path, registry)
         services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
-                            acknowledged_path=config.home / "acknowledged-conflicts.json")
+                            acknowledged_path=config.home / "acknowledged-conflicts.json",
+                            references=ReferenceAllocator(config.share_root))
         services.sync()
         services.start_polling()
         app = create_app(services, config.env, token, port)

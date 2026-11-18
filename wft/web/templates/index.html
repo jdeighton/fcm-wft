@@ -24,10 +24,11 @@
   <h2>Requests</h2>
   {% if requests %}
   <table>
-    <thead><tr><th>Title</th><th>Workflow</th><th>Status</th><th>Current step</th><th>Created by</th><th>Created (UTC)</th></tr></thead>
+    <thead><tr><th>Reference</th><th>Title</th><th>Workflow</th><th>Status</th><th>Current step</th><th>Created by</th><th>Created (UTC)</th></tr></thead>
     <tbody>
     {% for r in requests %}
       <tr>
+        <td>{{ r.reference or ("—" if r.status == "Draft" else "pending") }}</td>
         <td><a href="/requests/{{ r.request_id }}">{{ r.title }}</a></td>
         <td>{{ r.workflow }}</td>
         <td><span class="status status-{{ r.status | lower }}">{{ r.status }}</span></td>

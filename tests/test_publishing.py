@@ -85,6 +85,7 @@ def test_requests_stay_on_the_version_they_started_on(tmp_path, share):
     registry = DefinitionRegistry.from_share(share)
     svc = Services(FileRepository(share, "alice"), ReadModel(tmp_path / "c.sqlite", registry), registry, "alice", "pc")
     old = svc.create_request("simple@1", "Started on v1")
+    svc.submit(old, {})
 
     v2 = copy.deepcopy(MANUAL)
     v2.update(version=2, title="Simple v2")
@@ -94,6 +95,7 @@ def test_requests_stay_on_the_version_they_started_on(tmp_path, share):
 
     assert [w.key for w in registry.latest()] == ["simple@2"]
     new = svc.create_request(registry.latest()[0].key, "Started on v2")
+    svc.submit(new, {})
     assert svc.get(old)[1].key == "simple@1" and [s.id for s in svc.get(old)[0].steps] == ["a", "b"]
     assert [s.id for s in svc.get(new)[0].steps] == ["a", "b", "c"]
     for step in ("a", "b"):
@@ -105,6 +107,7 @@ def test_requests_stay_on_the_version_they_started_on(tmp_path, share):
 def test_requests_for_definitions_not_loaded_yet_are_projected_later(tmp_path, share, registry):
     alice = make_services(share, tmp_path / "a.sqlite", registry, "alice")
     rid = alice.create_request("demo_manual@1", "x")
+    alice.submit(rid, {})
     empty = DefinitionRegistry()
     bob = Services(FileRepository(share, "bob"), ReadModel(tmp_path / "b.sqlite", empty), empty, "bob", "pc")
     bob.sync()

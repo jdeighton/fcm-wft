@@ -26,3 +26,40 @@ def write_defs(root: Path, *workflows: dict, files: dict[str, object] | None = N
             content = json.dumps(content) if rel.endswith(".json") else yaml.safe_dump(content)
         path.write_text(content)
     return root
+
+
+CAPTURE_SCHEMA = {
+    "type": "object",
+    "required": ["account", "limits"],
+    "properties": {
+        "account": {"type": "string", "title": "Account", "minLength": 1},
+        "limits": {"type": "object", "required": ["max"], "properties": {
+            "max": {"type": "number", "minimum": 0, "title": "Max position"},
+            "currency": {"type": "string", "enum": ["USD", "EUR"]},
+        }},
+        "markets": {"type": "array", "items": {"type": "string", "enum": ["CME", "ICE", "EUREX"]}},
+        "users": {"type": "array", "items": {"type": "object", "required": ["id"], "properties": {
+            "id": {"type": "string"}, "access": {"type": "string", "enum": ["trade", "view"]}}}},
+        "aliases": {"type": "array", "items": {"type": "string"}},
+        "effective": {"type": "string", "format": "date"},
+        "justification": {"type": "string", "maxLength": 2000},
+        "urgent": {"type": "boolean"},
+    },
+}
+APPROVAL_SCHEMA = {"type": "object", "required": ["ticket"], "properties": {"ticket": {"type": "string"}}}
+
+FORMS = {
+    "id": "limits", "version": 1, "title": "Limit change", "reference_prefix": "LIM",
+    "inputs_schema": "capture.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "title": "Capture", "schema": "capture.schema.json"},
+        {"id": "apply", "type": "manual", "depends_on": ["capture"], "checklist": ["Apply it"],
+         "consumes": ["account", "limits.*"]},
+        {"id": "record", "type": "form", "depends_on": ["apply"], "schema": "approval.schema.json"},
+    ],
+}
+FORMS_FILES = {
+    "schemas/capture.schema.json": CAPTURE_SCHEMA,
+    "schemas/approval.schema.json": APPROVAL_SCHEMA,
+    "samples/limits.yaml": {"capture": {"account": "ACC1", "limits": {"max": 10}}, "record": {"ticket": "K-1"}},
+}
