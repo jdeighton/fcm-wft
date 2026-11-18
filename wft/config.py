@@ -1,12 +1,20 @@
 """Per-user environment configuration loaded from `<WFT_HOME>/<env>.env`."""
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 ENVIRONMENTS = ("prod", "uat")
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ENVIRONMENT_RULES = REPO_ROOT / "config" / "environments.yaml"
+ENV_MARKER = Path("meta") / "environment"
+# Every key an env file may contain; keep `.env.example` in step.
+SUPPORTED_KEYS = ("WFT_SHARE_ROOT", "WFT_PORT", "WFT_DEFINITIONS_DIR")
 
 
 class ConfigError(Exception):
@@ -23,7 +31,9 @@ class Config:
 
     @property
     def cache_path(self) -> Path:
-        return self.home / "cache" / f"{self.env}.sqlite"
+        # Keyed by share as well as env, so repointing an env file never shows another share's data.
+        share = hashlib.sha256(str(self.share_root).lower().encode()).hexdigest()[:12]
+        return self.home / "cache" / f"{self.env}-{share}.sqlite"
 
 
 def wft_home() -> Path:
@@ -47,7 +57,37 @@ def parse_env_file(text: str) -> dict[str, str]:
     return values
 
 
-def load_config(env: str, home: Path | None = None) -> Config:
+def check_environment(env: str, values: dict[str, str], rules: dict[str, dict[str, list[str]]]) -> None:
+    """Refuse values that don't look like `env`, or that look like another environment."""
+    problems = []
+    for key, value in values.items():
+        own = rules.get(env, {}).get(key)
+        if own is not None and not any(re.search(p, value, re.IGNORECASE) for p in own):
+            problems.append(f"{key}={value} does not look like a {env} value")
+        for other, other_rules in rules.items():
+            if other != env and any(re.search(p, value, re.IGNORECASE) for p in other_rules.get(key, ())):
+                problems.append(f"{key}={value} looks like a {other} value")
+    if problems:
+        raise ConfigError(f"The {env} env file mixes environments:\n  " + "\n  ".join(problems))
+
+
+def load_rules(path: Path = ENVIRONMENT_RULES) -> dict[str, dict[str, list[str]]]:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def check_share_marker(config: Config) -> None:
+    """The share declares its own environment in `meta/environment`; it must match."""
+    marker = config.share_root / ENV_MARKER
+    try:
+        declared = marker.read_text(encoding="utf-8").strip().lower()
+    except FileNotFoundError:
+        raise ConfigError(f"{marker} is missing. An admin must create it containing '{config.env}'.") from None
+    if declared != config.env:
+        raise ConfigError(f"Running as {config.env} but the share at {config.share_root} is marked '{declared}'.")
+
+
+def load_config(env: str, home: Path | None = None,
+                rules: dict[str, dict[str, list[str]]] | None = None) -> Config:
     if env not in ENVIRONMENTS:
         raise ConfigError(f"Unknown environment {env!r}; expected one of {', '.join(ENVIRONMENTS)}")
     home = home or wft_home()
@@ -55,6 +95,10 @@ def load_config(env: str, home: Path | None = None) -> Config:
     if not env_file.is_file():
         raise ConfigError(f"Env file not found: {env_file}. Copy .env.example there and fill it in.")
     values = parse_env_file(env_file.read_text(encoding="utf-8"))
+    unknown = sorted(set(values) - set(SUPPORTED_KEYS))
+    if unknown:
+        raise ConfigError(f"Unknown key(s) in {env_file}: {', '.join(unknown)}")
+    check_environment(env, values, load_rules() if rules is None else rules)
 
     share_root = values.get("WFT_SHARE_ROOT")
     if not share_root:

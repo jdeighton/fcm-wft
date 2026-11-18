@@ -11,12 +11,14 @@ from fastapi.templating import Jinja2Templates
 
 from wft.engine import CommandError
 from wft.services import NotFound, Services
+from wft.web import security
 
 HERE = Path(__file__).parent
 
 
-def create_app(services: Services, env: str) -> FastAPI:
+def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     app = FastAPI(title="WFT", docs_url=None, redoc_url=None, openapi_url=None)
+    security.install(app, token, port)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals.update(env=env, user=services.user)

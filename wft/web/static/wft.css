@@ -23,5 +23,9 @@ code { font-size:.8rem; word-break:break-all; }
 .status-completed { color:var(--ok); border-color:var(--ok); } .status-active { color:var(--accent); border-color:var(--accent); }
 .step-status { font-size:.75rem; color:var(--muted); font-weight:400; }
 .checklist { list-style:none; padding:0; } .checklist li { padding:2px 0; } .checklist form { display:inline; }
-.env-banner { background:var(--warn); color:#fff; text-align:center; font-weight:700; padding:6px; letter-spacing:.05em; }
+.env-banner { position:sticky; top:0; z-index:10; background:var(--warn); color:#fff; text-align:center; font-weight:700; padding:6px; letter-spacing:.05em; }
+/* Non-production: tinted header and page edges so UAT is never mistaken for prod. */
+body.env-uat { --uat-tint:#fff1e0; border-left:6px solid var(--warn); border-right:6px solid var(--warn); min-height:100vh; }
+@media (prefers-color-scheme: dark) { body.env-uat { --uat-tint:#3a2614; } }
+body.env-uat header { background:var(--uat-tint); }
 .error p { margin:4px 0; }
