@@ -256,6 +256,7 @@ Later: cycle-time analytics per workflow/step, off-process by reason, ETA.
 
 - **FR-12.1** **Request record**: per-request HTML (printable to PDF) showing all data, steps, every event with actor and UTC timestamp, notes, flags and attachment list.
 - **FR-12.2** **Excel export** of the current filtered request list, and of step timings (one row per step instance: request, workflow, version, step, state transitions, work time, wait time by reason, hold time).
+- **FR-12.3** The record is a self-contained page (Print / Save as PDF, or download as HTML) and also lists actions overridden by a simultaneous change. Excel exports use the request list's filters; times are real Excel date-times in UTC and durations are hours. The timings workbook has a second sheet with every step state change. Text is always stored as text, so a value like `=HYPERLINK(...)` can't run as a formula.
 
 ### 6.13 Attachments
 

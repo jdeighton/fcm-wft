@@ -226,6 +226,12 @@ class ReadModel:
         chain, _ = engine.resolve(events)
         return sorted(chain + engine.annotations(events), key=lambda e: (e.ts, e.seq, e.event_id))
 
+    def overridden(self, request_id: str) -> list[Event]:
+        """Actions on a request that lost to a simultaneous change, oldest first."""
+        with self._lock:
+            rows = self._db.execute("SELECT line FROM conflicts WHERE request_id = ?", (request_id,)).fetchall()
+        return sorted((Event.from_line(r[0]) for r in rows), key=lambda e: e.ts)
+
     def conflicts_for(self, actor: str) -> list[Event]:
         """Actions by `actor` that were overridden by someone else's concurrent action."""
         with self._lock:

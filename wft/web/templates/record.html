@@ -1,0 +1,125 @@
+{% from "_form.html" import readonly %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ req.reference or req.title }}: request record</title>
+<style>
+  :root { --fg:#1d2433; --muted:#667085; --line:#d0d5dd; --warn:#b54708; --bad:#b42318; }
+  * { box-sizing: border-box; }
+  body { margin:0 auto; max-width:1000px; padding:24px 16px; font:13px/1.45 system-ui, "Segoe UI", sans-serif; color:var(--fg); background:#fff; }
+  h1 { font-size:1.4rem; margin:0 0 4px; } h2 { font-size:1.05rem; margin:22px 0 6px; border-bottom:2px solid var(--fg); padding-bottom:2px; }
+  h3 { font-size:.95rem; margin:12px 0 4px; }
+  .muted { color:var(--muted); } .small { font-size:.85em; }
+  table { width:100%; border-collapse:collapse; margin:4px 0 8px; }
+  th, td { text-align:left; vertical-align:top; padding:3px 6px; border-bottom:1px solid var(--line); }
+  th { font-weight:600; background:#f2f4f7; }
+  dl.data { display:grid; grid-template-columns:minmax(140px, max-content) 1fr; gap:2px 14px; margin:4px 0; }
+  dl.data dt { color:var(--muted); } dl.data dd { margin:0; }
+  .row-item { border-left:2px solid var(--line); padding-left:8px; margin:2px 0; }
+  code, pre { font:11px/1.35 ui-monospace, Consolas, monospace; white-space:pre-wrap; word-break:break-all; margin:0; }
+  .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:0 7px; font-size:.8em; }
+  .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .toolbar { display:flex; gap:10px; margin-bottom:14px; }
+  .toolbar a, .toolbar button { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--fg); text-decoration:none; cursor:pointer; }
+  .step { break-inside:avoid; }
+  footer { margin-top:24px; border-top:1px solid var(--line); padding-top:6px; }
+  @media print { .toolbar { display:none; } body { padding:0; } h2 { break-after:avoid; } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <a href="/requests/{{ req.request_id }}">← Back to the request</a>
+  <button type="button" onclick="window.print()">Print / Save as PDF</button>
+  <a href="/requests/{{ req.request_id }}/record?download=1">Download HTML</a>
+</div>
+
+<h1>{% if req.reference %}{{ req.reference }}: {% endif %}{{ req.title }}</h1>
+<p class="muted">Request record · {{ env | upper }} environment · generated {{ generated }} UTC by {{ user | person }}</p>
+
+<h2>Summary</h2>
+<dl class="data">
+  <dt>Workflow</dt><dd>{{ defn.title }} (<code>{{ req.workflow }}</code>)</dd>
+  <dt>Status</dt><dd><strong>{{ req.status }}</strong>{% if req.cancel_reason %}: {{ req.cancel_reason }}{% endif %}</dd>
+  <dt>Owner</dt><dd>{{ req.owner | person }}</dd>
+  <dt>Created</dt><dd>{{ req.created_at | utc }} UTC by {{ req.created_by | person }}</dd>
+  <dt>Submitted</dt><dd>{% if req.submitted_at %}{{ req.submitted_at | utc }} UTC by {{ req.submitted_by | person }}{% else %}—{% endif %}</dd>
+  {% if req.completed_at %}<dt>Completed</dt><dd>{{ req.completed_at | utc }} UTC</dd>{% endif %}
+  {% if req.cancelled_at %}<dt>Cancelled</dt><dd>{{ req.cancelled_at | utc }} UTC</dd>{% endif %}
+  {% if req.rejected_at %}<dt>Rejected</dt><dd>{{ req.rejected_at | utc }} UTC</dd>{% endif %}
+  {% for h in req.holds %}<dt>On hold</dt><dd>{{ h.start | utc }} → {{ (h.end | utc) if h.end else "now" }} UTC, by {{ h.by | person }}: {{ h.reason }}</dd>{% endfor %}
+  {% if parent %}<dt>Sub-request of</dt><dd>{{ parent.reference or parent.title }} ({{ parent.title }})</dd>{% endif %}
+  {% if original %}<dt>Follow-up to</dt><dd>{{ original.reference or original.title }}</dd>{% endif %}
+  {% if children %}<dt>Sub-requests</dt><dd>{% for c in children %}{{ c.reference or c.title }} ({{ c.status }}){% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+  {% if follow_ups %}<dt>Follow-ups</dt><dd>{% for f in follow_ups %}{{ f.reference or f.title }} ({{ f.status }}){% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+  {% if off_process %}<dt>Off-process records</dt><dd>{% for o in off_process %}{{ o.reference or "pending" }}: {{ o.what }}{% if not loop.last %}; {% endif %}{% endfor %}</dd>{% endif %}
+</dl>
+
+<h2>Steps</h2>
+{% for s in req.steps %}{% set sd = defn.step(s.id) %}
+<div class="step">
+  <h3>{{ loop.index }}. {{ sd.title }} <span class="tag">{{ s.status | replace("_", " ") }}</span> <span class="muted small">{{ sd.type }}</span></h3>
+  {% if s.completed_by %}<p class="small">Completed by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC{% if s.assignee %} · assigned to {{ s.assignee | person }}{% endif %}</p>{% elif s.assignee %}<p class="small">Assigned to {{ s.assignee | person }}</p>{% endif %}
+  {% if sd.type == "form" and s.data is not none %}{{ readonly(forms[s.id]) }}
+  {% elif sd.checklist %}<p class="small">{% for item in sd.checklist %}{{ "☑" if (loop.index0 in s.ticked or s.status == "done") else "☐" }} {{ item }}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+  {% if s.data and sd.type != "form" %}<pre>{{ s.data | tojson(indent=2) }}</pre>{% endif %}
+  {% if s.transitions %}{% set t = step_timing(s, none, req.holds) %}
+  <p class="small muted">Queued {{ t.queued | duration }} · working {{ t.working | duration }}{% for reason, secs in t.waiting.items() %} · waiting on {{ wait_reasons[reason] | lower }} {{ secs | duration }}{% endfor %}{% if t.held %} · on hold {{ t.held | duration }} (not counted){% endif %} · {{ "took" if t.finished_at else "open for" }} {{ t.elapsed | duration }}</p>
+  <table class="small">
+    <thead><tr><th>When (UTC)</th><th>State</th><th>Who</th><th>Reason / note</th></tr></thead>
+    <tbody>{% for tr in s.transitions %}<tr><td>{{ tr.ts | utc }}</td><td>{{ tr.status | replace("_", " ") }}</td><td>{{ tr.actor | person }}</td><td>{{ tr.reason or "" }}{% if tr.note %}{{ " · " if tr.reason }}{{ tr.note }}{% endif %}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% endif %}
+</div>
+{% endfor %}
+
+<h2>Impact flags</h2>
+{% if req.flags %}
+<table>
+  <thead><tr><th>Step</th><th>Raised (UTC)</th><th>Why</th><th>Action needed</th><th>Resolution</th></tr></thead>
+  <tbody>{% for f in req.flags %}
+    <tr><td>{{ defn.step(f.step).title if f.step else "Request" }}{% if f.child %} (sub-request){% endif %}</td>
+        <td>{{ f.raised_at | utc }}<br><span class="muted">{{ f.raised_by | person }}</span></td>
+        <td>{{ f.trigger }}</td>
+        <td>{{ f.action }}{% if f.compensation %}<br><span class="muted">To roll back: {{ f.compensation }}</span>{% endif %}</td>
+        <td>{% if f.resolution %}{{ resolutions[f.resolution] }} by {{ f.resolved_by | person }}, {{ f.resolved_at | utc }} UTC: {{ f.notes }}{% else %}<strong class="bad">Open</strong>{% endif %}</td></tr>
+  {% endfor %}</tbody>
+</table>
+{% else %}<p class="muted">None.</p>{% endif %}
+
+<h2>Notes</h2>
+{% for n in req.notes %}<p><span class="muted small">{{ n.ts | utc }} UTC · {{ n.actor | person }}</span><br>{{ n.text }}</p>{% else %}<p class="muted">None.</p>{% endfor %}
+
+<h2>Attachments</h2>
+{% if req.attachments %}
+<table>
+  <thead><tr><th>File</th><th>Size</th><th>Step</th><th>Added (UTC)</th><th>SHA-256</th></tr></thead>
+  <tbody>{% for a in req.attachments %}
+    <tr><td>{{ a.name }}</td><td>{{ a.size | filesize }}</td><td>{{ defn.step(a.step).title if a.step else "—" }}</td>
+        <td>{{ a.ts | utc }}<br><span class="muted">{{ a.actor | person }}</span></td><td><code>{{ a.sha256 }}</code></td></tr>
+  {% endfor %}</tbody>
+</table>
+{% else %}<p class="muted">None.</p>{% endif %}
+
+<h2>Full history</h2>
+<p class="muted small">Every recorded event, in time order, with who did it and when (UTC).</p>
+<table>
+  <thead><tr><th>When (UTC)</th><th>Who</th><th>Event</th><th>Details</th></tr></thead>
+  <tbody>{% for e in events %}
+    <tr><td>{{ e.ts | replace("T", " ") | replace("+00:00", "") }}</td><td>{{ e.actor | person }}<br><span class="muted small">{{ e.host }}</span></td>
+        <td>{{ e.type | replace("_", " ") }}{% if e.payload.auto %} <span class="muted small">(automatic)</span>{% endif %}</td>
+        <td><code>{{ e.payload | tojson }}</code></td></tr>
+  {% endfor %}</tbody>
+</table>
+{% if overridden %}
+<h3>Actions overridden by a simultaneous change</h3>
+<p class="muted small">Recorded but not applied, because someone else acted on the request at the same moment.</p>
+<table>
+  <thead><tr><th>When (UTC)</th><th>Who</th><th>Event</th><th>Details</th></tr></thead>
+  <tbody>{% for e in overridden %}<tr><td>{{ e.ts | utc }}</td><td>{{ e.actor | person }}</td><td>{{ e.type | replace("_", " ") }}</td><td><code>{{ e.payload | tojson }}</code></td></tr>{% endfor %}</tbody>
+</table>
+{% endif %}
+
+<footer class="muted small">Generated from WFT's journal on the shared drive. Request id <code>{{ req.request_id }}</code>.</footer>
+</body>
+</html>
