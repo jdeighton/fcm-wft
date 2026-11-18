@@ -42,6 +42,7 @@ class StepDef:
     checklist: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
     form_schema: dict | None = field(default=None, compare=False, repr=False)  # loaded JSON Schema of a form step
+    artefacts: tuple[dict, ...] = field(default=(), compare=False, repr=False)  # [{generator, mapping (loaded)}]
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -108,10 +109,16 @@ def parse_workflow(data: dict, base: Path | None = None) -> WorkflowDef:
             form_schema = None
             if isinstance(s.get("schema"), str) and base is not None:
                 form_schema = json.loads((base / "schemas" / s["schema"]).read_text(encoding="utf-8"))
+            artefacts = []
+            for a in s.get("artefacts") or ():
+                mapping = None
+                if isinstance(a.get("mapping"), str) and base is not None:
+                    mapping = read_yaml(base / "mappings" / a["mapping"])
+                artefacts.append({"generator": a.get("generator"), "mapping": mapping, "ref": a.get("mapping")})
             steps.append(StepDef(
                 id=s["id"], type=s["type"], title=s.get("title", s["id"]),
                 checklist=tuple(checklist), depends_on=tuple(s.get("depends_on", ())),
-                form_schema=form_schema, raw=s,
+                form_schema=form_schema, artefacts=tuple(artefacts), raw=s,
             ))
         return WorkflowDef(id=data["id"], version=int(data["version"]), title=data["title"],
                            steps=tuple(steps), min_app_version=data.get("min_app_version"), raw=data)

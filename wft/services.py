@@ -1,13 +1,14 @@
 """Application services: run engine commands, stamp and persist events, update the read model."""
 from __future__ import annotations
 
+import io
 import json
 import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from wft import __version__, engine, timings
+from wft import __version__, artefacts, engine, timings
 from wft.adapters import Adapter, AdapterUnavailable, NotFoundInSystem, compare, split_operation
 from wft.adapters.cache import Picklist, PicklistCache
 from wft import offprocess
@@ -88,6 +89,7 @@ STATUS_FILTERS = {
     "cancelling": (engine.CANCELLING,),
     "completed": (engine.COMPLETED,),
     "cancelled": (engine.CANCELLED,),
+    "rejected": (engine.REJECTED,),
     "all": None,
 }
 
@@ -614,6 +616,48 @@ class Services:
             return att, self.attachments.open_path(att.path)
         except FileNotFoundError:
             raise CommandError(f"{att.name} isn't on the shared drive (is it reachable?)") from None
+
+    # --- generated files, external requests, outcomes -----------------------------
+
+    def generate_files(self, request_id: str, step_id: str) -> list[str]:
+        """Generate a step's files (e.g. the KRM22 CSV) and attach them to the step. Returns their names.
+
+        Raises ArtefactInvalid (with field-level problems) if the request's data can't make a valid file;
+        nothing is attached then.
+        """
+        if self.attachments is None:
+            raise CommandError("Attachments aren't available")
+        state, defn = self._load(request_id)
+        engine._workable_step(state, defn, step_id)
+        sd = defn.step(step_id)
+        if not sd.artefacts:
+            raise CommandError(f"Step {step_id!r} doesn't generate any files")
+        built = [artefacts.generate_csv(a["mapping"] or {}, engine.context(state)) for a in sd.artefacts]
+        names = []
+        for art in built:
+            try:
+                stored = self.attachments.put(request_id, art.filename, io.BytesIO(art.content))
+            except OSError as e:
+                self._go_read_only(e)
+                raise ReadOnly("The share became unavailable; the file was not attached") from e
+            with self._lock:
+                state, defn = self._load(request_id)
+                self._record(request_id, defn, engine.add_attachment(
+                    state, defn, art.filename, stored.size, stored.sha256, stored.path, step_id, generated=True))
+            names.append(art.filename)
+        return names
+
+    def raise_external(self, request_id: str, step_id: str, reference: str, link: str = "") -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.raise_external(state, defn, step_id, reference, link))
+
+    def record_outcome(self, request_id: str, step_id: str, outcome: str, notes: str = "",
+                       captured=None, choice: str | None = None) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn,
+                         engine.record_outcome(state, defn, step_id, outcome, notes, captured, choice))
 
     def hold(self, request_id: str, reason: str) -> None:
         """Hold the request and its active child requests; flag children with work in progress."""

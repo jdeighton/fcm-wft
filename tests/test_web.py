@@ -458,3 +458,38 @@ def test_notifications_page_badge_title_and_status(share, tmp_path, registry):
     assert "bob made you the owner" in client.get("/notifications").text
     client.get(f"/requests/{rid}")  # viewing it marks it read
     assert client.get("/status").json()["unread"] == 0
+
+
+def test_krm22_pages(share, tmp_path, krm22_registry):
+    from tests.conftest import make_services
+    from tests.test_krm22 import ZN
+    svc = make_services(share, tmp_path / "kw.sqlite", krm22_registry)
+    client = client_for(svc)
+    rid = svc.create_request("krm_limits@1", "ACC1")
+    svc.submit(rid, {"capture": {"account": "ACC1", "products": [{**ZN, "type": "Future"}]}})
+    page = client.get(f"/requests/{rid}").text
+    assert "Generate KRM22 file" in page and "Generate the file before completing" in page
+    svc.amend(rid, {"capture": {"account": "ACC1", "products": [{k: v for k, v in ZN.items() if k != "max_order_qty"}]}})
+    bad = client.post(f"/requests/{rid}/steps/csv/generate")
+    assert bad.status_code == 422 and "Max order quantity is required" in bad.text
+    svc.amend(rid, {"capture": {"account": "ACC1", "products": [ZN]}})
+    client.post(f"/requests/{rid}/steps/csv/generate")
+    assert "_KRM22.csv" in client.get(f"/requests/{rid}").text
+    svc.set_checklist_item(rid, "csv", 0, True)
+    svc.complete_step(rid, "csv")
+    assert "Record as raised" in client.get(f"/requests/{rid}").text
+    client.post(f"/requests/{rid}/steps/raise/raise", data={"reference": "KRM-1", "link": "https://krm.example.invalid/1"})
+    page = client.get(f"/requests/{rid}").text
+    assert ">KRM-1</a>" in page and "Approved with changes…" in page and "Rejected…" in page and "Withdrawn…" not in page
+    assert 'name="capture.applied_products.0.exchange"' in page
+    r = client.post(f"/requests/{rid}/steps/result/outcome", data={
+        "outcome": "approved_with_changes", "notes": "smaller", "capture.applied_products.0.exchange": "CME",
+        "capture.applied_products.0.family": "CBOT", "capture.applied_products.0.type": "Future",
+        "capture.applied_products.0.product": "ZN", "capture.applied_products.0.action": "add",
+        "capture.applied_products.0.max_order_qty": "5", "capture.applied_products.0.max_position": "20"},
+        follow_redirects=False)
+    assert r.status_code == 303
+    data = svc.get(rid)[0].step("result").data
+    assert data["applied_products"][0]["max_order_qty"] == 5
+    page = client.get(f"/requests/{rid}").text
+    assert "Outcome: <strong>Approved with changes</strong>" in page and "differs from request" in page

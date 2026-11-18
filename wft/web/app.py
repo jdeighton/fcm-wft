@@ -17,6 +17,7 @@ from wft.services import STATUS_FILTERS, FileTooLarge, NotFound, ReadOnly, Servi
 from wft.web import security
 from wft.web.forms import build_fields, parse_form, picklist_names
 from wft.adapters import AdapterUnavailable, NotFoundInSystem
+from wft.artefacts import ArtefactInvalid
 
 HERE = Path(__file__).parent
 
@@ -255,6 +256,37 @@ def create_app(services: Services, env: str, token: str, port: int, browser_noti
         services.reject_approval(request_id, step_id, notes)
         return back_to(request_id)
 
+    @app.post("/requests/{request_id}/steps/{step_id}/generate")
+    def generate(request: Request, request_id: str, step_id: str):
+        try:
+            services.generate_files(request_id, step_id)
+        except ArtefactInvalid as e:
+            return show(request, request_id, 422, message="The file couldn't be generated:", problems=e.problems)
+        return RedirectResponse(f"/requests/{request_id}#step-{step_id}", status_code=303)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/raise")
+    def raise_external(request_id: str, step_id: str, reference: Annotated[str, Form()] = "",
+                       link: Annotated[str, Form()] = ""):
+        services.raise_external(request_id, step_id, reference, link)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/outcome")
+    async def record_outcome(request: Request, request_id: str, step_id: str):
+        state, defn = services.get(request_id)
+        posted = await request.form()
+        form = {k: posted.getlist(k) for k in posted.keys()}
+        outcome = (form.get("outcome") or [""])[0]
+        sd = defn.step(step_id)
+        spec = engine.outcome_spec(sd, outcome)
+        captured = None
+        cap = engine.capture_spec(spec)
+        if cap:
+            schema = _capture_schema(defn, *cap)
+            captured = parse_form(schema, form, "capture.").get(cap[0])
+        services.record_outcome(request_id, step_id, outcome, (form.get("notes") or [""])[0], captured,
+                                (form.get("choice") or [None])[0])
+        return back_to(request_id)
+
     @app.post("/picklists/refresh")
     def refresh_picklists(request: Request):
         names = [f"{system}.{op}" for system, a in services.adapters.items() for op in sorted(a.list_operations)]
@@ -312,7 +344,7 @@ def create_app(services: Services, env: str, token: str, port: int, browser_noti
 
     def show(request: Request, request_id: str, status_code: int = 200,
              values: dict[str, dict] | None = None, errors: dict[str, dict] | None = None,
-             message: str | None = None) -> HTMLResponse:
+             message: str | None = None, problems: list[str] | None = None) -> HTMLResponse:
         """The request page. `values`/`errors` (per form step) re-display a form that failed validation."""
         state, defn = services.get(request_id)
         values, errors = values or {}, errors or {}
@@ -327,13 +359,16 @@ def create_app(services: Services, env: str, token: str, port: int, browser_noti
             lists = {n: services.picklist(n) for n in picklist_names(sd.form_schema)} if sd.id in editable else {}
             forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.", lists)
         verify = {sd.id: _verify_view(state, defn, sd.id) for sd in defn.steps if sd.type == "verify"}
+        outcome_forms = {sd.id: _capture_fields(state, defn, sd) for sd in defn.steps if sd.type == "outcome"}
+        files = {sd.id: engine.step_files(state, sd.id) for sd in defn.steps if sd.artefacts}
         follow_ups = services.follow_ups(request_id)
         linked_off_process = services.off_process_for_request(request_id)
         parent = services.rm.get(state.parent["request"]) if state.parent else None
         children = {c.request_id: c for c in services.children(request_id)}
         original = services.rm.get(state.follow_up_of) if state.follow_up_of else None
         return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
-                      verify=verify, message=message, linked_off_process=linked_off_process,
+                      verify=verify, message=message, problems=problems or [], linked_off_process=linked_off_process,
+                      outcome_forms=outcome_forms, step_files=files,
                       parent=parent, children=children,
                       follow_ups=follow_ups, original=original,
                       editable=editable_forms(state, defn), form_errors=errors,
@@ -427,7 +462,7 @@ def create_app(services: Services, env: str, token: str, port: int, browser_noti
 
 
 STATUS_LABELS = {"open": "Open", "draft": "Draft", "active": "Active", "on_hold": "On hold",
-                 "cancelling": "Cancelling", "completed": "Completed", "cancelled": "Cancelled", "all": "All"}
+                 "cancelling": "Cancelling", "completed": "Completed", "cancelled": "Cancelled", "rejected": "Rejected", "all": "All"}
 
 
 def _systems(services: Services) -> list[str]:
@@ -449,6 +484,29 @@ def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
     return path if path in ("/", "/tasks", "/waiting", "/flags", "/off-process", "/notifications") or path.startswith("/requests/") else default
+
+
+def _capture_schema(defn, name: str, source: str) -> dict:
+    """A one-field form schema for an outcome's captured value, taken from the inputs field it starts from."""
+    prop: dict = {"type": "string"}
+    for sd in engine.initial_forms(defn):
+        node = sd.form_schema or {}
+        for part in source.split("."):
+            node = (node.get("properties") or {}).get(part, {}) if isinstance(node, dict) else {}
+        if node:
+            prop = {**node, "title": name.replace("_", " ").capitalize()}
+            break
+    return {"type": "object", "properties": {name: prop}}
+
+
+def _capture_fields(state, defn, sd) -> dict:
+    """Per outcome that captures values: form fields pre-filled with what was requested."""
+    out = {}
+    for name, spec in sd.raw.get("outcomes", {}).items():
+        cap = engine.capture_spec(spec)
+        if cap:
+            out[name] = build_fields(_capture_schema(defn, *cap), {cap[0]: state.inputs.get(cap[1])}, None, "capture.")
+    return out
 
 
 def _verify_view(state, defn, step_id: str) -> dict:

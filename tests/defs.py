@@ -158,3 +158,49 @@ FAMILY_FILES = {
     "samples/demo_account.yaml": {"capture": {"account": "A1", "access": "trade"}},
     "samples/demo_client.yaml": {"capture": {"client": "Acme", "accounts": [{"account": "A1", "access": "trade"}]}},
 }
+
+
+def krm22_mapping() -> str:
+    from wft.config import REPO_ROOT
+    return (REPO_ROOT / "definitions/mappings/krm22/tt_limit_upload.mapping.yaml").read_text()
+
+
+PRODUCT = {"type": "object", "required": ["exchange", "family", "type", "product", "action"], "properties": {
+    "exchange": {"type": "string"}, "family": {"type": "string"},
+    "type": {"type": "string", "enum": ["Future", "Spread", "Option"]}, "product": {"type": "string"},
+    "action": {"type": "string", "enum": ["add", "change", "remove"]},
+    "max_order_qty": {"type": "integer"}, "max_position": {"type": "integer"}}}
+KRM_CAPTURE = {"type": "object", "required": ["account", "products"], "properties": {
+    "account": {"type": "string"}, "products": {"type": "array", "minItems": 1, "items": PRODUCT}}}
+KRM_FLOW = {
+    "id": "krm_limits", "version": 1, "title": "KRM22 limit change", "reference_prefix": "LIM",
+    "inputs_schema": "krm_capture.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "krm_capture.schema.json"},
+        {"id": "csv", "type": "manual", "title": "Generate KRM22 CSV", "depends_on": ["capture"],
+         "checklist": ["Check the CSV"], "consumes": ["account", "products"],
+         "artefacts": [{"generator": "krm22.csv", "mapping": "krm22/tt_limit_upload.mapping.yaml"}]},
+        {"id": "raise", "type": "external_request", "title": "Raise in KRM22", "depends_on": ["csv"],
+         "platform": "KRM22", "wait_reason": "krm22", "consumes": ["account", "products"],
+         "on_amend": {"flag": "KRM22 request no longer matches", "route_to": "csv"},
+         "on_cancel": {"flag": "Withdraw the request in KRM22"}},
+        {"id": "result", "type": "outcome", "title": "KRM22 outcome", "depends_on": ["raise"],
+         "outcomes": {
+             "approved": {"next": "confirm"},
+             "approved_with_changes": {"next": "confirm", "label": "Approved with changes",
+                                       "capture": {"name": "applied_products", "from": "products"},
+                                       "marker": "differs_from_request"},
+             "rejected": {"choices": ["amend_and_resubmit", "close_rejected"]},
+             "withdrawn": {"only_during": "cancel"},
+         }},
+        {"id": "confirm", "type": "manual", "title": "Confirm in TT", "depends_on": ["result"], "checklist": ["Checked"]},
+    ],
+}
+
+
+def krm_files() -> dict:
+    return {"schemas/krm_capture.schema.json": KRM_CAPTURE,
+            "mappings/krm22/tt_limit_upload.mapping.yaml": krm22_mapping(),
+            "samples/krm_limits.yaml": {"capture": {"account": "ACC1", "products": [
+                {"exchange": "CME", "family": "CBOT", "type": "Future", "product": "ZN", "action": "add",
+                 "max_order_qty": 50, "max_position": 200}]}}}

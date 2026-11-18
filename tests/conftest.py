@@ -99,3 +99,9 @@ def tt_services(share, tmp_path, tt_registry):
 def family_registry(tmp_path) -> DefinitionRegistry:
     from tests.defs import CHILD, FAMILY_FILES, PARENT, write_defs
     return DefinitionRegistry.from_repo(write_defs(tmp_path / "family-defs", PARENT, CHILD, files=FAMILY_FILES))
+
+
+@pytest.fixture
+def krm22_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import KRM_FLOW, krm_files, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "krm22-defs", KRM_FLOW, files=krm_files()))

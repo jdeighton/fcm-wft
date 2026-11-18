@@ -1,0 +1,36 @@
+# KRM22 limit upload CSV for TT (agreed format: see issue #12).
+# One data row per product in the request's `products` list. Each product row has:
+#   exchange, family, type (Future | Spread | Option), product,
+#   action (add | change | remove; a change is written like an add),
+#   max_order_qty, max_position (whole numbers > 0; not needed when removing).
+# ASSUMPTION to confirm: when removing a product, Max order quantity and
+# Max position product (net) are also written as "Not Set".
+description: KRM22 limit upload for TT accounts
+filename: "{{ request.reference }}_KRM22.csv"
+header_lines:
+  - [Header, IsvInstance, IsvTeType, IsvTeName]
+rows_from: inputs.products
+action_from: row.action
+columns:
+  - {name: Header, value: Data}
+  - {name: IsvInstance, value: TTRest01}
+  - {name: IsvTeType, value: Account}
+  - {name: IsvTeName, value: "{{ inputs.account }}", required: true}
+  - {name: Exchange, value: "{{ row.exchange }}", required: true}
+  - {name: Family, value: "{{ row.family }}", required: true}
+  - {name: Type, value: "{{ row.type }}", required: true, enum: [Future, Spread, Option]}
+  - {name: Product, value: "{{ row.product }}", required: true}
+  - {name: Contract, value: ""}
+  - {name: Product Code Path, value: ""}
+  - {name: Applied margin %, add: "100", remove: Not Set}
+  - {name: Max long position(gross), value: Not Set}
+  - {name: Max order quantity, value: "{{ row.max_order_qty }}", remove: Not Set, required: true, positive_integer: true}
+  - {name: Max position product (net), value: "{{ row.max_position }}", remove: Not Set, required: true, positive_integer: true}
+  - {name: Max short position (gross), value: Not Set}
+  - {name: "Spreads: Applied margin %", add: "100", remove: Not Set}
+  - {name: "Spreads: max order quantity", value: Not Set}
+  - {name: "Spreads: Trading Allowed", add: "TRUE", remove: Not Set}
+  - {name: Trading Allowed, add: "TRUE", remove: Not Set}
+  - {name: "Wholesale Spreads: max order quantity", value: Not Set}
+  - {name: "Wholesale: Max order quantity", value: Not Set}
+  - {name: "Wholesale: Trading allowed", value: "FALSE"}
