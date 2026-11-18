@@ -41,5 +41,16 @@
   </ul>
 </section>
 {% endif %}
-{# "My requests with open flags" is added with impact flags (#9). #}
+{% if tasks.flagged %}
+<section class="card">
+  <h2>My requests with open flags <span class="muted small">({{ tasks.flagged | length }})</span></h2>
+  <ul>
+  {% for r in tasks.flagged %}
+    <li><a href="/requests/{{ r.request_id }}#flags">{{ r.reference or r.title }}</a> {{ r.title if r.reference else "" }}
+      <span class="status status-{{ r.status | lower }}">{{ r.status }}</span>
+      <span class="muted small">{{ r.flags | selectattr("open") | list | length }} open</span></li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
 {% endblock %}
