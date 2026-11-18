@@ -5,7 +5,7 @@ A template is plain text with `{{ ... }}` holes. Inside a hole:
     expr     := pipeline [ ("==" | "!=") operand ]
     pipeline := operand ( "|" filter )*
     operand  := path | 'string' | "string" | number | true | false | null
-    path     := root ( "." name )*        root ∈ inputs, steps, item, request
+    path     := root ( "." name )*        root ∈ inputs, steps, item, request, row
     filter   := name [ "(" operand ( "," operand )* ")" ]
 
 Filters: default(x), join(sep), upper, lower, length. Nothing else can be called,
@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-ROOTS = ("inputs", "steps", "item", "request")
+ROOTS = ("inputs", "steps", "item", "request", "row")
 
 _TOKEN = re.compile(r"""
     \s*(?:

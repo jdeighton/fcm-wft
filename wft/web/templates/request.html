@@ -34,7 +34,7 @@
   {% endif %}
 </section>
 
-{% if message %}<div class="banner banner-flag" role="alert">{{ message }}</div>{% endif %}
+{% if message %}<div class="banner banner-flag" role="alert">{{ message }}{% if problems %}<ul class="problems">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>{% endif %}</div>{% endif %}
 {% set current_hold = req.holds | selectattr("end", "none") | first if req.holds else none %}
 {% if req.status == "OnHold" and current_hold %}
 <div class="banner banner-hold" role="status">
@@ -43,6 +43,8 @@
 </div>
 {% elif req.status == "Cancelling" %}
 <div class="banner banner-flag" role="status"><strong>Cancelling</strong> ({{ req.cancel_reason }}). Resolve the open flags below to finish cancelling.</div>
+{% elif req.status == "Rejected" %}
+<div class="banner" role="status"><strong>Rejected</strong> {{ req.rejected_at | utc }} UTC. Create a follow-up request if it needs raising again.</div>
 {% elif req.status == "Cancelled" %}
 <div class="banner" role="status"><strong>Cancelled</strong> {{ req.cancelled_at | utc }} UTC: {{ req.cancel_reason }}</div>
 {% elif req.awaiting_flags %}
@@ -52,7 +54,7 @@
 {% if req.status not in ("Draft",) %}
 <p class="small"><a href="/off-process?link={{ req.reference or req.request_id }}">Log an off-process setup for this request…</a></p>
 {% endif %}
-{% if req.status in ("Completed", "Cancelled") %}
+{% if req.status in ("Completed", "Cancelled", "Rejected") %}
 <section class="card">
   <form method="post" action="/requests/{{ req.request_id }}/follow-up" class="row inline-form">
     <span class="muted">This request is {{ req.status | lower }} and can't be changed. Need something more?</span>
@@ -145,7 +147,7 @@
     <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/resume" class="row inline-form">
       <span>Waiting on <strong>{{ wait_reasons[s.wait_reason] }}</strong>{% if s.wait_note %}: {{ s.wait_note }}{% endif %}
         <span class="muted small">since {{ s.since | utc }} UTC</span></span>
-      <button type="submit">Resume</button>
+      {% if sd.type != "outcome" %}<button type="submit">Resume</button>{% else %}<span class="muted small">Ends when the outcome is recorded.</span>{% endif %}
     </form>
   </div>
   {% endif %}
@@ -167,6 +169,16 @@
     </form>
   </div>
   {% endif %}
+  {% if sd.artefacts %}
+  <div class="generated">
+    {% set mine = step_files[s.id] %}
+    {% if mine %}<p class="small">Generated: {% for a in mine %}<a href="/requests/{{ req.request_id }}/attachments/{{ a.sha256 }}">{{ a.name }}</a> <span class="muted">({{ a.ts | utc }} UTC)</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+    {% if workable %}
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/generate"><button type="submit" class="secondary">{{ "Generate again" if mine else "Generate " ~ (sd.artefacts[0].generator | replace(".csv", "") | upper) ~ " file" }}</button></form>
+    {% if not mine %}<p class="help">Generate the file before completing this step.</p>{% endif %}
+    {% endif %}
+  </div>
+  {% endif %}
   {% if sd.type == "form" %}
     {% if workable %}
     {% if form_errors.get(s.id) %}<p class="field-error" role="alert">Some fields need attention.</p>{% endif %}
@@ -183,6 +195,42 @@
     {{ readonly(forms[s.id]) }}
     {% else %}
     <p class="muted">Not filled in yet.</p>
+    {% endif %}
+  {% elif sd.type == "external_request" %}
+    {% if s.data and s.data.reference %}
+    <p>Raised in <strong>{{ s.data.platform }}</strong> as <strong>{% if s.data.link %}<a href="{{ s.data.link }}" rel="noreferrer noopener" target="_blank">{{ s.data.reference }}</a>{% else %}{{ s.data.reference }}{% endif %}</strong>
+      <span class="muted small">by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</span></p>
+    {% if s.data.artefacts %}<p class="small">With: {% for a in s.data.artefacts %}<a href="/requests/{{ req.request_id }}/attachments/{{ a.sha256 }}">{{ a.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+    {% elif workable %}
+    <p class="muted small">Raise it in {{ sd.raw.platform }}, then record the reference here. The next step will wait on {{ sd.raw.platform }} until the result is recorded.</p>
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/raise" class="row inline-form">
+      <label>{{ sd.raw.platform }} reference <input name="reference" required maxlength="100"></label>
+      <label>Link (optional) <input name="link" type="url" maxlength="500" placeholder="https://…"></label>
+      <button type="submit">Record as raised</button>
+    </form>
+    {% endif %}
+  {% elif sd.type == "outcome" %}
+    {% if s.status == "done" and s.data %}
+    <p>Outcome: <strong>{{ s.data.label }}</strong>{% if s.data.marker %} <span class="pill pill-waiting">{{ s.data.marker | replace("_", " ") }}</span>{% endif %}{% if s.data.choice %} <span class="muted small">({{ s.data.choice | replace("_", " ") }})</span>{% endif %}
+      <span class="muted small">by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</span></p>
+    {% if s.data.notes %}<p class="small">{{ s.data.notes }}</p>{% endif %}
+    {% elif s.status in ("ready", "in_progress", "waiting") and req.status in ("Active", "Cancelling") %}
+    {% for name, o in sd.raw.outcomes.items() if (req.status == "Cancelling") == (o.only_during == "cancel") %}
+    <details class="outcome-form">
+      <summary>{{ o.label or (name | replace("_", " ") | capitalize) }}…</summary>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/outcome" class="form">
+        <input type="hidden" name="outcome" value="{{ name }}">
+        {% for f in outcome_forms[s.id].get(name, []) %}{{ field(f) }}{% endfor %}
+        {% if o.choices %}
+        <fieldset class="field choices"><legend>What next</legend>
+          {% for c in o.choices %}<label><input type="radio" name="choice" value="{{ c }}" {% if loop.first %}checked{% endif %}> {{ "Amend and resubmit" if c == "amend_and_resubmit" else "Close the request as rejected" }}</label>{% endfor %}
+        </fieldset>
+        {% endif %}
+        <label>Notes{% if o.choices or o.marker %} <span class="req">*</span>{% endif %} <input name="notes" maxlength="1000" {% if o.choices or o.marker %}required{% endif %}></label>
+        <div class="actions"><button type="submit">Record {{ (o.label or name | replace("_", " ")) | lower }}</button></div>
+      </form>
+    </details>
+    {% endfor %}
     {% endif %}
   {% elif sd.type == "subworkflow" %}{% set kids = (s.data or {}).get("children") %}
     {% if kids is none %}

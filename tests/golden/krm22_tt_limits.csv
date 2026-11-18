@@ -1,0 +1,5 @@
+Header,IsvInstance,IsvTeType,IsvTeName
+Header,IsvInstance,IsvTeType,IsvTeName,Exchange,Family,Type,Product,Contract,Product Code Path,Applied margin %,Max long position(gross),Max order quantity,Max position product (net),Max short position (gross),Spreads: Applied margin %,Spreads: max order quantity,Spreads: Trading Allowed,Trading Allowed,Wholesale Spreads: max order quantity,Wholesale: Max order quantity,Wholesale: Trading allowed
+Data,TTRest01,Account,ACC1,CME,CBOT,Future,ZN,,,100,Not Set,50,200,Not Set,100,Not Set,TRUE,TRUE,Not Set,Not Set,FALSE
+Data,TTRest01,Account,ACC1,CME,NYMEX,Option,"CL, LO",,,100,Not Set,10,40,Not Set,100,Not Set,TRUE,TRUE,Not Set,Not Set,FALSE
+Data,TTRest01,Account,ACC1,Eurex,ALL,Option,OGBL,,,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,Not Set,FALSE

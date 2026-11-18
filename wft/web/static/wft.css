@@ -114,3 +114,8 @@ table.compare tr.differs td { background:rgba(217,45,32,.08); }
 .notice-away { background:#e0eaff; color:#1d2b5c; }
 @media (prefers-color-scheme: dark) { .notice-away { background:#1d2b5c; color:#d1defe; } }
 tr.unread td { font-weight:600; }
+.problems { margin:6px 0 0; padding-left:20px; font-weight:400; }
+.outcome-form summary { cursor:pointer; color:var(--accent); margin:4px 0; }
+.outcome-form form { margin:6px 0 10px; }
+.generated { margin-bottom:8px; }
+.status-rejected { color:#d92d20; border-color:#d92d20; }

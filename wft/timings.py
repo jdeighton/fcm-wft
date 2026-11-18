@@ -95,7 +95,7 @@ def time_on_hold(state: RequestState, now: datetime | None = None) -> float:
 
 def request_age(state: RequestState, now: datetime | None = None) -> float:
     """Since the request was submitted (or created, for a Draft) until it completed, or now."""
-    end = state.completed_at or state.cancelled_at or now or now_utc()
+    end = state.completed_at or state.cancelled_at or state.rejected_at or now or now_utc()
     return seconds_between(state.submitted_at or state.created_at, end)
 
 

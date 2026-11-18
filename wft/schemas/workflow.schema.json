@@ -176,11 +176,15 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "generator"
+              "generator",
+              "mapping"
             ],
             "properties": {
               "generator": {
-                "type": "string"
+                "enum": [
+                  "krm22.csv",
+                  "csv"
+                ]
               },
               "mapping": {
                 "$ref": "#/$defs/mappingRef"
@@ -296,10 +300,36 @@
                     ]
                   },
                   "capture": {
-                    "type": "string"
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "description": "An inputs field to capture (its current value is the default)"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "name",
+                          "from"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "from": {
+                            "type": "string",
+                            "description": "The inputs field whose form and value it starts from"
+                          }
+                        }
+                      }
+                    ]
                   },
                   "marker": {
                     "type": "string"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 }
               }

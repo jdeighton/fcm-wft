@@ -1,16 +1,23 @@
 {
-  "$comment": "DRAFT TT limit-change capture form. Confirm fields against the TT data dictionary (owner: TT schema owner) before use (#14).",
+  "$comment": "DRAFT TT limit-change capture form, shaped for the KRM22 upload (one row per product; see mappings/krm22/tt_limit_upload.mapping.yaml). Confirm against the TT data dictionary before use (#14); product pickers come with #36.",
   "type": "object",
-  "required": ["account", "limits"],
+  "required": ["account", "products"],
   "properties": {
     "account": {"type": "string", "title": "TT account", "x-picklist": "tt.accounts", "minLength": 1},
-    "current": {"type": "object", "title": "Current limits in TT", "description": "Filled from TT; for reference"},
-    "limits": {
-      "type": "object", "title": "Requested limits", "required": ["max_position"],
-      "properties": {
-        "max_position": {"type": "number", "minimum": 0, "title": "Max position"},
-        "max_order_qty": {"type": "number", "minimum": 0, "title": "Max order quantity"},
-        "credit": {"type": "number", "minimum": 0, "title": "Credit limit"}
+    "products": {
+      "type": "array", "minItems": 1, "title": "Products",
+      "items": {
+        "type": "object",
+        "required": ["exchange", "family", "type", "product", "action"],
+        "properties": {
+          "exchange": {"type": "string", "title": "Exchange"},
+          "family": {"type": "string", "title": "Family"},
+          "type": {"type": "string", "title": "Type", "enum": ["Future", "Spread", "Option"]},
+          "product": {"type": "string", "title": "Product"},
+          "action": {"type": "string", "title": "Action", "enum": ["add", "change", "remove"]},
+          "max_order_qty": {"type": "integer", "minimum": 1, "title": "Max order quantity"},
+          "max_position": {"type": "integer", "minimum": 1, "title": "Max position (net)"}
+        }
       }
     },
     "justification": {"type": "string", "maxLength": 2000, "title": "Justification"}

@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS journal_cursor (
 """
 TABLES = ("events", "requests", "conflicts", "off_process", "notices", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 11
+CACHE_VERSION = 12
 
 
 @dataclass(frozen=True)

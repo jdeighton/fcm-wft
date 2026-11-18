@@ -15,6 +15,7 @@ from wft.definitions import (MANIFEST_FILE, PUBLISHED_DIR, DefinitionError, Work
                              parse_version, parse_workflow, referenced_files)
 from wft.events import Event
 from wft.adapters import known_fetch_operation, known_list_operation
+from wft.artefacts import mapping_errors
 from wft.expressions import ExpressionError, is_template, parse
 from wft.configfiles import CONFIG_FILES, REPO_CONFIG_DIR
 
@@ -199,7 +200,8 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
                 if not parse_checklist_md(path.read_text(encoding="utf-8")):
                     err(f"checklist {ref} has no '- item' lines")
             elif ref.startswith("mappings/"):
-                yaml.safe_load(path.read_text(encoding="utf-8"))
+                for problem in mapping_errors(yaml.safe_load(path.read_text(encoding="utf-8"))):
+                    err(f"{ref}: {problem}")
         except (ValueError, jsonschema.SchemaError, yaml.YAMLError) as e:
             err(f"{ref} is not valid: {str(e).splitlines()[0]}")
 
@@ -234,6 +236,23 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
             if wf and wf not in known_ids:
                 err(f"step {s['id']!r}: {what} {wf!r} is not a known workflow")
     deps = {s["id"]: [d for d in s.get("depends_on", ()) if d in step_ids] for s in steps}
+    by_id = {s["id"]: s for s in steps}
+    for s in steps:
+        if s["type"] != "outcome":
+            continue
+        externals = [d for d in s.get("depends_on", ()) if by_id.get(d, {}).get("type") == "external_request"]
+        for name, o in s["outcomes"].items():
+            if o.get("next") in step_ids and s["id"] not in deps.get(o["next"], ()):
+                err(f"outcome step {s['id']!r}: {name!r} goes to {o['next']!r}, which must depend on the outcome step")
+            if "amend_and_resubmit" in (o.get("choices") or ()) and not externals:
+                err(f"outcome step {s['id']!r}: {name!r} offers amend_and_resubmit, so it must follow an "
+                    "external_request step (to know where to go back to)")
+            cap = o.get("capture")
+            source = cap if isinstance(cap, str) else (cap or {}).get("from")
+            if source and inputs_schema is not None and not _schema_has(inputs_schema, source.split(".")):
+                err(f"outcome step {s['id']!r}: {name!r} captures {source!r}, which is not in {data['inputs_schema']}")
+            if source and "inputs_schema" not in data:
+                err(f"outcome step {s['id']!r}: {name!r} captures {source!r} but the workflow has no inputs_schema")
     for s in steps:
         if s["type"] != "decision":
             continue
@@ -490,6 +509,8 @@ def dry_run(defn: WorkflowDef, samples: dict | None = None) -> list[str]:
             problems.append(f"dry run: path [{', '.join(labels[:5])}, ...] is longer than {MAX_ACTIONS_PER_PATH} actions (loop?)")
             continue
         for label, commands in options:
+            if "amend_and_resubmit" in label and label in labels:
+                continue  # one resubmission per path is enough to prove the route; more would loop forever
             s = state
             try:
                 for command in commands:

@@ -90,10 +90,10 @@ def test_duplicate_step_ids(tmp_path):
     assert has(errors(tmp_path, d), "step id 'a' is used more than once")
 
 
-def test_unsupported_step_types_are_reported(tmp_path):
-    d = wf()
-    d["steps"].append({"id": "c", "type": "outcome", "depends_on": ["b"], "outcomes": {"ok": {}}})
-    assert has(errors(tmp_path, d), "step type(s) outcome not supported")
+def test_engine_supports_every_step_type_in_the_schema():
+    from wft import engine
+    from wft.validation import WORKFLOW_SCHEMA
+    assert set(WORKFLOW_SCHEMA["$defs"]["stepCommon"]["properties"]["type"]["enum"]) == engine.SUPPORTED_STEP_TYPES
 
 
 def test_outcome_routes_must_exist(tmp_path):
