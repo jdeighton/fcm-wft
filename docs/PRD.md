@@ -211,6 +211,8 @@ User-level limits are **not** part of this workflow in Release 1 (would require 
   - `verify` steps.
 - **FR-7.3** TT API credentials are **per user**, held in the user's environment file (see [§7.5](#75-configuration--environments)), never on the share or in Git.
 - **FR-7.4** If the TT API is unavailable, `verify` steps can be completed manually with notes (*completed outside tool*); picklists fall back to free text with a warning.
+- **FR-7.4a How it appears in definitions:** a form field with `"x-picklist": "tt.accounts"` (or `tt.users`) offers suggestions from TT and still accepts typed values; a form step's `prefill: {operation, key, target}` adds a "Fill current values from TT" button; a `verify` step names `adapter` (e.g. `tt.account_limits`), `key` and `expected` (expressions). Checking records the result (match / mismatch / unavailable, with expected vs actual) on the step; the user then accepts (a reason is required if there are differences), records an issue (the step waits on the trading system), or completes it by hand with notes.
+- **FR-7.4b Settings:** `WFT_TT_BASE_URL`, `WFT_TT_ENVIRONMENT`, `WFT_TT_APP_KEY`, `WFT_TT_APP_SECRET` (and optional `WFT_TT_APP_NAME`, `WFT_TT_COMPANY`, `WFT_TT_CACHE_MINUTES`) in the user's env file; `WFT_TT_BASE_URL=fake:` uses sample data for trials. The TT environment name is checked against the env profile. Picklists are cached in the user's profile, never on the share.
 - **FR-7.5** The adapter interface must also allow, in later releases, a **file-drop** data source (manually exported files placed in `imports\<system>\inbox\`), with the export date shown against any comparison.
 
 ### 6.8 KRM22 CSV

@@ -14,6 +14,7 @@ from wft import __version__, engine
 from wft.definitions import (MANIFEST_FILE, PUBLISHED_DIR, DefinitionError, WorkflowDef, parse_checklist_md,
                              parse_version, parse_workflow, referenced_files)
 from wft.events import Event
+from wft.adapters import known_fetch_operation, known_list_operation
 from wft.expressions import ExpressionError, is_template, parse
 from wft.team import REPO_ROLES_FILE, roles_errors
 
@@ -194,6 +195,23 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
         except (ValueError, jsonschema.SchemaError, yaml.YAMLError) as e:
             err(f"{ref} is not valid: {str(e).splitlines()[0]}")
 
+    # Trading-system operations
+    for s in steps:
+        if s["type"] == "verify" and not known_fetch_operation(s["adapter"]):
+            err(f"step {s['id']!r}: unknown adapter operation {s['adapter']!r}")
+        prefill = s.get("prefill")
+        if prefill and not known_fetch_operation(prefill["operation"]):
+            err(f"step {s['id']!r}: unknown prefill operation {prefill['operation']!r}")
+    for s in steps:
+        if s.get("schema") and (base / "schemas" / s["schema"]).is_file():
+            try:
+                form_schema = json.loads((base / "schemas" / s["schema"]).read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            for where, name in _picklists(form_schema):
+                if not known_list_operation(name):
+                    err(f"schemas/{s['schema']}: {where}: unknown picklist {name!r}")
+
     # Dependencies and routing
     for s in steps:
         for dep in s.get("depends_on", ()):
@@ -298,6 +316,17 @@ def _routes(step: dict) -> Iterator[tuple[str, str]]:
         yield branch["next"], f"branch {i + 1}"
     if step.get("default"):
         yield step["default"], "default branch"
+
+
+def _picklists(schema: Any, where: str = "") -> Iterator[tuple[str, str]]:
+    """(field path, picklist name) for every `x-picklist` in a JSON Schema."""
+    if isinstance(schema, dict):
+        if isinstance(schema.get("x-picklist"), str):
+            yield where or "(root)", schema["x-picklist"]
+        for key, sub in (schema.get("properties") or {}).items():
+            yield from _picklists(sub, f"{where}.{key}" if where else key)
+        if isinstance(schema.get("items"), dict):
+            yield from _picklists(schema["items"], f"{where}[]")
 
 
 def _ancestors(deps: dict[str, list[str]], node: str) -> set[str]:

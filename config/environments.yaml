@@ -9,6 +9,10 @@
 prod:
   WFT_SHARE_ROOT:
     - '[\\/]prod([\\/]|$)'
+  WFT_TT_ENVIRONMENT:
+    - '^ext_prod'
 uat:
   WFT_SHARE_ROOT:
     - '[\\/]uat([\\/]|$)'
+  WFT_TT_ENVIRONMENT:
+    - 'uat'

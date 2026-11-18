@@ -77,3 +77,19 @@ def krm_registry(tmp_path) -> DefinitionRegistry:
 def amend_registry(tmp_path) -> DefinitionRegistry:
     from tests.defs import AMENDABLE, AMENDABLE_FILES, write_defs
     return DefinitionRegistry.from_repo(write_defs(tmp_path / "amend-defs", AMENDABLE, files=AMENDABLE_FILES))
+
+
+@pytest.fixture
+def tt_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import TT_FILES, TT_FLOW, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "tt-defs", TT_FLOW, files=TT_FILES))
+
+
+@pytest.fixture
+def tt_services(share, tmp_path, tt_registry):
+    from wft.adapters.cache import PicklistCache
+    from wft.adapters.fake import FakeTT
+    svc = make_services(share, tmp_path / "tt.sqlite", tt_registry)
+    svc.adapters = {"tt": FakeTT()}
+    svc.picklists = PicklistCache(tmp_path / "picklists.json", 3600)
+    return svc

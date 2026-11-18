@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from wft import __version__, engine, timings
+from wft.adapters import Adapter, AdapterUnavailable, NotFoundInSystem, compare, split_operation
+from wft.adapters.cache import Picklist, PicklistCache
 from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
@@ -116,7 +118,8 @@ class Services:
     def __init__(self, repo: Repository, read_model: ReadModel, registry: DefinitionRegistry,
                  user: str, host: str, acknowledged_path: Path | None = None,
                  references: ReferenceAllocator | None = None, team: TeamSource | None = None,
-                 attachments: AttachmentStore | None = None):
+                 attachments: AttachmentStore | None = None, adapters: dict[str, Adapter] | None = None,
+                 picklists: PicklistCache | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
@@ -126,6 +129,8 @@ class Services:
         self.references = references
         self.team_source = team
         self.attachments = attachments
+        self.adapters = adapters or {}
+        self.picklists = picklists
         self._lock = threading.Lock()
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -349,6 +354,83 @@ class Services:
         with self._lock:
             state, defn = self._load(request_id)
             self._record(request_id, defn, engine.amend_request(state, defn, forms))
+
+    # --- trading systems -------------------------------------------------------
+
+    def _adapter(self, operation: str) -> tuple[Adapter, str]:
+        system, op = split_operation(operation)
+        adapter = self.adapters.get(system)
+        if adapter is None:
+            raise AdapterUnavailable(f"{system.upper()} isn't configured for this environment")
+        return adapter, op
+
+    def picklist(self, name: str, force: bool = False) -> Picklist:
+        """Suggestions for a form field (`x-picklist`), cached locally. Never raises: falls back to typing."""
+        try:
+            adapter, op = self._adapter(name)
+        except AdapterUnavailable as e:
+            return Picklist([], None, True, str(e))
+        if self.picklists is None:
+            try:
+                return Picklist(adapter.list(op), None, False)
+            except AdapterUnavailable as e:
+                return Picklist([], None, True, str(e))
+        return self.picklists.get(name, lambda: adapter.list(op), force=force)
+
+    def refresh_picklists(self, names: list[str]) -> dict[str, Picklist]:
+        return {n: self.picklist(n, force=True) for n in names}
+
+    def verify_check(self, request_id: str, step_id: str) -> dict:
+        """Look the step's item up in the trading system, compare with what's expected, and record the result."""
+        state, defn = self._load(request_id)
+        operation, key, expected = engine.verify_target(state, defn, step_id)
+        engine._verify_step(state, defn, step_id)  # fail fast before calling the system
+        check = {"operation": operation, "key": key, "expected": expected}
+        try:
+            adapter, op = self._adapter(operation)
+            fetched = adapter.fetch(op, key)
+            differences = compare(expected, fetched.values)
+            check.update(outcome=engine.MISMATCH if differences else engine.MATCH, actual=fetched.values,
+                         differences=differences, source=fetched.source, as_of=fetched.as_of)
+        except NotFoundInSystem as e:
+            check.update(outcome=engine.MISMATCH, actual=None, error=str(e),
+                         differences=[{"field": "(item)", "expected": key, "actual": "not found"}])
+        except AdapterUnavailable as e:
+            check.update(outcome=engine.UNAVAILABLE, error=str(e))
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.record_check(state, defn, step_id, check))
+        return check
+
+    def accept_verification(self, request_id: str, step_id: str, notes: str = "") -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.accept_verification(state, defn, step_id, notes))
+
+    def complete_verification_manually(self, request_id: str, step_id: str, notes: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.complete_verification_manually(state, defn, step_id, notes))
+
+    def prefill(self, request_id: str, step_id: str, data: dict) -> dict:
+        """Fill a form's `prefill.target` from the trading system, keyed by `prefill.key` in the form data.
+
+        Saves the result as the form's draft and returns it. Raises AdapterUnavailable / NotFoundInSystem.
+        """
+        state, defn = self._load(request_id)
+        spec = defn.step(step_id).raw.get("prefill")
+        if not spec:
+            raise CommandError("This form has nothing to fill from a trading system")
+        key = data
+        for part in spec["key"].split("."):
+            key = key.get(part) if isinstance(key, dict) else None
+        if key in (None, ""):
+            raise CommandError(f"Fill in {spec['key']} first")
+        adapter, op = self._adapter(spec["operation"])
+        fetched = adapter.fetch(op, key)
+        filled = {**data, spec["target"]: fetched.values}
+        self.save_form(request_id, step_id, filled)
+        return filled
 
     def hold(self, request_id: str, reason: str) -> None:
         with self._lock:

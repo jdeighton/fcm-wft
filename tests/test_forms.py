@@ -66,3 +66,12 @@ def test_blank_and_bad_input_gives_clear_errors():
     }
     assert validate_form(CAPTURE_SCHEMA, parse_form(CAPTURE_SCHEMA, {"limits.max": ["-1"], "account": ["A"]})) == {
         "limits.max": "Must be at least 0"}
+
+
+def test_data_objects_are_shown_and_carried_through():
+    schema = {"type": "object", "properties": {"current": {"type": "object"}, "a": {"type": "string"}}}
+    [current, _] = build_fields(schema, {"current": {"max": 1000}})
+    assert current.kind == "data" and current.value == {"max": 1000}
+    form = {"current.__json": ['{"max": 1000}'], "a": ["x"]}
+    assert parse_form(schema, form) == {"current": {"max": 1000}, "a": "x"}
+    assert parse_form(schema, {"current.__json": ["not json"]}) == {}

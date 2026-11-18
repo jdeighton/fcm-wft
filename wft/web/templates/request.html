@@ -32,6 +32,7 @@
   {% endif %}
 </section>
 
+{% if message %}<div class="banner banner-flag" role="alert">{{ message }}</div>{% endif %}
 {% set current_hold = req.holds | selectattr("end", "none") | first if req.holds else none %}
 {% if req.status == "OnHold" and current_hold %}
 <div class="banner banner-hold" role="status">
@@ -117,6 +118,7 @@
     {% endfor %}
     <div class="actions">
       <button type="submit" name="_action" value="save" class="secondary">Save draft</button>
+      {% for sd in editable if sd.raw.prefill %}<button type="submit" name="_action" value="prefill" class="secondary">Fill current values from {{ sd.raw.prefill.operation.split(".")[0] | upper }}</button>{% endfor %}
       <button type="submit" name="_action" value="submit">Submit</button>
     </div>
   </form>
@@ -129,7 +131,7 @@
 
 {% for s in req.steps %}{% set sd = defn.step(s.id) %}
 {% if not (req.status == "Draft" and sd in editable) %}
-<section class="card step step-{{ s.status }}">
+<section class="card step step-{{ s.status }}" id="step-{{ s.id }}">
   {% set workable = s.status in ("ready", "in_progress") and req.status == "Active" %}
   {% set open = s.status in ("ready", "in_progress", "waiting") and req.status == "Active" %}
   <h2>{{ sd.title }} <span class="pill pill-{{ s.status }}">{{ s.status | replace("_", " ") }}</span></h2>
@@ -168,6 +170,7 @@
       {% for f in forms[s.id] %}{{ field(f) }}{% endfor %}
       <div class="actions">
         <button type="submit" name="_action" value="save" class="secondary">Save</button>
+        {% if sd.raw.prefill %}<button type="submit" name="_action" value="prefill" class="secondary">Fill current values from {{ sd.raw.prefill.operation.split(".")[0] | upper }}</button>{% endif %}
         <button type="submit" name="_action" value="submit">Submit</button>
       </div>
     </form>
@@ -175,6 +178,52 @@
     {{ readonly(forms[s.id]) }}
     {% else %}
     <p class="muted">Not filled in yet.</p>
+    {% endif %}
+  {% elif sd.type == "verify" %}{% set v = verify[s.id] %}
+    <p>Checks <strong>{{ v.key if v.key not in (none, "") else "—" }}</strong> with <code>{{ v.operation }}</code>.</p>
+    {% if v.last %}
+    {% set outcome = v.last.outcome %}
+    <p class="check check-{{ outcome }}">
+      {% if outcome == "match" %}✔ Matches{% elif outcome == "mismatch" %}✖ Differences found{% else %}⚠ Couldn't check{% endif %}
+      <span class="muted small">· {{ v.last.checked_at | utc }} UTC by {{ v.last.checked_by | person }}{% if v.last.source %} · {{ v.last.source }}{% endif %}{% if v.last.as_of %} · data as of {{ v.last.as_of | utc }}{% endif %}</span>
+    </p>
+    {% if v.last.error %}<p class="small warn">{{ v.last.error }}</p>{% endif %}
+    {% if v.rows %}
+    <table class="compare">
+      <thead><tr><th>Field</th><th>Expected</th><th>In the system</th></tr></thead>
+      <tbody>{% for f, e, a, differs in v.rows %}
+        <tr class="{{ 'differs' if differs }}"><td><code>{{ f }}</code></td><td>{{ e if e is not none else "—" }}</td><td>{{ a if a is not none else "—" }}{% if differs %} <span class="pill pill-flag">differs</span>{% endif %}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <p class="muted small">Expected: {{ v.expected | tojson if v.expected is mapping else v.expected }}</p>
+    {% endif %}
+    {% if s.status == "done" %}
+    <p class="small">{{ "Accepted" if v.result == "accepted" else "Checked by hand" }}{% if v.notes %}: {{ v.notes }}{% endif %}</p>
+    {% elif workable %}
+    <div class="row verify-actions">
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/verify/check"><button type="submit">{{ "Check again" if v.last else "Check in " ~ v.operation.split(".")[0] | upper }}</button></form>
+      {% if v.last and v.last.outcome != "unavailable" %}
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/verify/accept" class="row inline-form">
+        {% if v.last.outcome == "mismatch" %}<label>Why the differences are OK <input name="notes" required maxlength="500"></label>{% endif %}
+        <button type="submit" class="secondary">Accept</button>
+      </form>
+      {% endif %}
+    </div>
+    <details class="wait-form"><summary>Record an issue…</summary>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/wait" class="row inline-form">
+        <input type="hidden" name="reason" value="trading_system">
+        <label>What's wrong <input name="note" required maxlength="500" placeholder="e.g. limit still shows the old value"></label>
+        <button type="submit" class="secondary">Wait on the trading system</button>
+      </form>
+    </details>
+    <details class="wait-form"><summary>Complete by hand…</summary>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/verify/manual" class="row inline-form">
+        <label>How you checked <input name="notes" required maxlength="500" placeholder="e.g. checked in TT Setup screen"></label>
+        <button type="submit" class="secondary">Mark checked</button>
+      </form>
+    </details>
     {% endif %}
   {% else %}
   <ul class="checklist">
@@ -203,6 +252,7 @@
     {% if s.status == "ready" %}
     <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/start"><button type="submit" class="secondary">Start</button></form>
     {% endif %}
+    {% if sd.type != "verify" %}{# verify steps have their own "Record an issue" #}
     <details class="wait-form">
       <summary>Mark as waiting…</summary>
       <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/wait" class="row inline-form">
@@ -213,6 +263,7 @@
         <button type="submit" class="secondary">Mark waiting</button>
       </form>
     </details>
+    {% endif %}
   </div>
   {% endif %}
   {% set step_files = req.attachments | selectattr("step", "equalto", s.id) | list %}
