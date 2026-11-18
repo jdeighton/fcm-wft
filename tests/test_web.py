@@ -324,3 +324,32 @@ def test_hold_cancel_flags_and_follow_up_pages(share, tmp_path, krm_registry):
     assert "Follow-up to" in follow_page and "status-draft" in follow_page
     assert "Follow-ups:" in client.get(f"/requests/{rid}").text
     assert ">Cancelled<" in client.get("/?status=cancelled").text or "Cancelled" in client.get("/?status=cancelled").text
+
+
+def test_amend_preview_and_apply(share, tmp_path, amend_registry):
+    from tests.conftest import make_services
+    svc = make_services(share, tmp_path / "m.sqlite", amend_registry)
+    client = client_for(svc)
+    rid = svc.create_request("amendable@1", "x")
+    svc.submit(rid, {"capture": {"account": "ACC1", "limits": {"max": 10}}})
+    for step in ("csv", "raise"):
+        svc.set_checklist_item(rid, step, 0, True)
+        svc.complete_step(rid, step)
+    assert "Amend details" in client.get(f"/requests/{rid}").text
+    page = client.get(f"/requests/{rid}/amend").text
+    assert 'value="ACC1"' in page and 'value="10"' in page and "Apply amendment" not in page
+    form = {"capture.account": "ACC1", "capture.limits.max": "2500"}
+    preview = client.post(f"/requests/{rid}/amend", data={**form, "_action": "preview"})
+    assert preview.status_code == 200 and "limits.max" in preview.text and "<strong>2500</strong>" in preview.text
+    assert "KRM22 request no longer matches" in preview.text and "goes back to" in preview.text
+    assert 'data-autorefresh="false"' in preview.text and "Apply amendment" in preview.text
+    assert svc.get(rid)[0].flags == ()
+    bad = client.post(f"/requests/{rid}/amend", data={"capture.account": "ACC1", "_action": "preview"})
+    assert bad.status_code == 422 and "Required" in bad.text
+    r = client.post(f"/requests/{rid}/amend", data={**form, "_action": "apply"}, follow_redirects=False)
+    assert r.status_code == 303
+    page = client.get(f"/requests/{rid}").text
+    assert "<code>limits.max</code>: 10 → 2500" in page and "Needs re-check: limits.max changed" in page
+    raise_section = page[page.index("Raise in KRM22 <span class=\"pill pill-pending\""):page.index('id="attachments"')]
+    assert "open for" not in raise_section.split("</section>")[0]  # a reset (pending) step shows no running timer
+    assert client.post(f"/requests/{rid}/amend", data={**form, "_action": "apply"}).status_code == 409  # nothing changed

@@ -80,3 +80,25 @@ LIFECYCLE = {
 }
 LIFECYCLE_FILES = {"schemas/account.schema.json": ACCOUNT_SCHEMA,
                    "samples/krm.yaml": {"capture": {"account": "ACC1"}}}
+
+
+AMEND_SCHEMA = {"type": "object", "required": ["account", "limits"], "properties": {
+    "account": {"type": "string"},
+    "limits": {"type": "object", "required": ["max"], "properties": {"max": {"type": "number"}, "currency": {"type": "string"}}},
+    "comment": {"type": "string"},
+}}
+AMENDABLE = {
+    "id": "amendable", "version": 1, "title": "Amendable limit change", "inputs_schema": "amend.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "amend.schema.json"},
+        {"id": "csv", "type": "manual", "title": "Generate CSV", "depends_on": ["capture"],
+         "checklist": ["Generate"], "consumes": ["account", "limits.*"]},
+        {"id": "raise", "type": "manual", "title": "Raise in KRM22", "depends_on": ["csv"], "checklist": ["Upload"],
+         "consumes": ["account", "limits.*"],
+         "on_amend": {"flag": "KRM22 request no longer matches: withdraw or update it", "route_to": "csv"}},
+        {"id": "apply", "type": "manual", "title": "Apply", "depends_on": ["raise"], "checklist": ["Apply"],
+         "consumes": ["account"]},
+    ],
+}
+AMENDABLE_FILES = {"schemas/amend.schema.json": AMEND_SCHEMA,
+                   "samples/amendable.yaml": {"capture": {"account": "ACC1", "limits": {"max": 10}}}}

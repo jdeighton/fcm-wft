@@ -71,3 +71,9 @@ def forms_registry(tmp_path) -> DefinitionRegistry:
 def krm_registry(tmp_path) -> DefinitionRegistry:
     from tests.defs import LIFECYCLE, LIFECYCLE_FILES, write_defs
     return DefinitionRegistry.from_repo(write_defs(tmp_path / "krm-defs", LIFECYCLE, files=LIFECYCLE_FILES))
+
+
+@pytest.fixture
+def amend_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import AMENDABLE, AMENDABLE_FILES, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "amend-defs", AMENDABLE, files=AMENDABLE_FILES))
