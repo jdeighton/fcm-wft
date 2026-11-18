@@ -1,11 +1,16 @@
-# Guards against an env file pointing at the wrong environment
-# (e.g. uat.env with a production share or production TT URL).
+# Generic rules that stop an env file pointing at the wrong environment
+# (e.g. uat.env with a production share or production TT environment).
 #
 # For each environment, list env-file keys and regex patterns (case-insensitive).
 # A value must match at least one pattern for its own environment and must not
 # match any pattern for another environment. Keys absent from an env file are
-# not checked. Replace the placeholders with the firm's real share paths and
-# URLs before go-live.
+# not checked.
+#
+# THIS FILE IS PUBLIC. Keep it generic: no server names, share paths or
+# hostnames. Put the firm's real patterns (share paths, TT URL, KRM22 URL) in
+# environments.yaml next to each user's .env files (%USERPROFILE%\.wft\ or the
+# folder named by WFT_HOME). That file uses this same format and is merged over
+# these defaults per environment and per key.
 prod:
   WFT_SHARE_ROOT:
     - '[\\/]prod([\\/]|$)'

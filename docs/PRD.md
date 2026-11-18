@@ -347,7 +347,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 - Startup: `wft.bat [--env prod|uat]` (default `prod`).
 - Loads `%USERPROFILE%\.wft\<env>.env` containing: share root, TT API base URL, TT API key/secret, preferred port, (later) KRM22 settings.
 - `.env.example` committed to the repo listing all keys.
-- **Safety check:** the app refuses to start if the env file mixes environments (e.g. UAT profile pointing at a prod share or prod TT URL). Expected share/URL patterns per environment are defined in repo config (`config/environments.yaml`), and the share must contain `meta\environment` naming its environment. Unknown env-file keys are rejected.
+- **Safety check:** the app refuses to start if the env file mixes environments (e.g. UAT profile pointing at a prod share or prod TT URL). Generic share/URL patterns per environment are in the public repo config (`config/environments.yaml`); the firm's real patterns (share paths, TT and KRM22 URLs) go in a local `environments.yaml` beside the user's `.env` files, merged over the defaults per environment and per key, and never committed. An invalid local file stops start-up with a message naming it. The share must also contain `meta\environment` naming its environment. Unknown env-file keys are rejected.
 - UAT shows a persistent, highly visible banner and distinct colour scheme.
 
 ### 7.6 Deployment & updates
