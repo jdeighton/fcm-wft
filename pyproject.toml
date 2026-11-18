@@ -1,0 +1,8 @@
+[project]
+name = "wft"
+version = "0.1.0"
+description = "Workflow tracker for electronic trading environment setup and maintenance"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

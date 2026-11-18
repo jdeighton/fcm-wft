@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}WFT{% endblock %} · WFT</title>
+  <link rel="stylesheet" href="/static/wft.css">
+</head>
+<body class="env-{{ env }}">
+  {% if env != "prod" %}<div class="env-banner">{{ env | upper }} environment: not production</div>{% endif %}
+  <header>
+    <a href="/" class="brand">WFT</a>
+    <span class="who">{{ user }}</span>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

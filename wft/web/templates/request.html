@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ req.title }}{% endblock %}
+{% block content %}
+<p><a href="/">← All requests</a></p>
+<section class="card">
+  <h1>{{ req.title }} <span class="status status-{{ req.status | lower }}">{{ req.status }}</span></h1>
+  <p class="muted">{{ defn.title }} ({{ req.workflow }}) · created by {{ req.created_by }} at {{ req.created_at }}</p>
+</section>
+
+{% for s in req.steps %}{% set sd = defn.step(s.id) %}
+<section class="card step step-{{ s.status }}">
+  <h2>{{ sd.title }} <span class="step-status">{{ s.status }}</span></h2>
+  <ul class="checklist">
+  {% for item in sd.checklist %}{% set done = loop.index0 in s.ticked %}
+    <li>
+      {% if s.status == "ready" %}
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/checklist/{{ loop.index0 }}">
+        <input type="hidden" name="checked" value="{{ 'false' if done else 'true' }}">
+        <button type="submit" class="tick" aria-pressed="{{ 'true' if done else 'false' }}">{{ "☑" if done else "☐" }}</button>
+        {{ item }}
+      </form>
+      {% else %}
+      {{ "☑" if done or s.status == "done" else "☐" }} {{ item }}
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+  {% if s.status == "ready" %}
+  <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/complete">
+    <button type="submit" {% if s.ticked | length < sd.checklist | length %}disabled{% endif %}>Complete step</button>
+  </form>
+  {% elif s.status == "done" %}
+  <p class="muted">Completed by {{ s.completed_by }} at {{ s.completed_at }}</p>
+  {% endif %}
+</section>
+{% endfor %}
+
+<section class="card">
+  <h2>History</h2>
+  <table>
+    <thead><tr><th>#</th><th>Time (UTC)</th><th>Who</th><th>Event</th><th>Details</th></tr></thead>
+    <tbody>
+    {% for e in history %}
+      <tr><td>{{ e.seq }}</td><td>{{ e.ts }}</td><td>{{ e.actor }}</td><td>{{ e.type }}</td><td><code>{{ e.payload | tojson }}</code></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

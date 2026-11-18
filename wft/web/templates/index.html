@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Open requests{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>New request</h2>
+  <form method="post" action="/requests" class="row">
+    <label>Workflow
+      <select name="workflow" required>
+        {% for w in workflows %}<option value="{{ w.key }}">{{ w.title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Title <input name="title" required maxlength="200"></label>
+    <button type="submit">Create</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Requests</h2>
+  {% if requests %}
+  <table>
+    <thead><tr><th>Title</th><th>Workflow</th><th>Status</th><th>Current step</th><th>Created by</th><th>Created (UTC)</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+      <tr>
+        <td><a href="/requests/{{ r.request_id }}">{{ r.title }}</a></td>
+        <td>{{ r.workflow }}</td>
+        <td><span class="status status-{{ r.status | lower }}">{{ r.status }}</span></td>
+        <td>{{ r.current_step or "—" }}</td>
+        <td>{{ r.created_by }}</td>
+        <td>{{ r.created_at[:16] | replace("T", " ") }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No requests yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
