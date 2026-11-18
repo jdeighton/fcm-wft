@@ -15,6 +15,7 @@
     {% if req.submitted_at %}· submitted by {{ req.submitted_by }} at {{ req.submitted_at[:16] | replace("T", " ") }} UTC{% endif %}
     {% if req.status != "Draft" and not req.reference %}· reference pending{% endif %}
     {% if req.holds %}· on hold {{ time_on_hold(req) | duration }} in total{% endif %}
+    · <a href="/requests/{{ req.request_id }}/record">Request record (print / PDF)</a>
   </p>
   {% if parent %}<p class="small">Sub-request of <a href="/requests/{{ parent.request_id }}#step-{{ req.parent.step }}">{{ parent.reference or parent.title }}</a> {{ parent.title if parent.reference else "" }}</p>{% endif %}
   {% if original %}<p class="small">Follow-up to <a href="/requests/{{ original.request_id }}">{{ original.reference or original.title }}</a></p>{% endif %}

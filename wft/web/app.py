@@ -287,6 +287,32 @@ def create_app(services: Services, env: str, token: str, port: int, browser_noti
                                 (form.get("choice") or [None])[0])
         return back_to(request_id)
 
+    @app.get("/requests/{request_id}/record")
+    def record(request: Request, request_id: str, download: bool = False):
+        rec = services.request_record(request_id)
+        forms = {sd.id: build_fields(sd.form_schema or {}, rec["req"].step(sd.id).data or {}, None, f"{sd.id}.")
+                 for sd in rec["defn"].steps if sd.type == "form"}
+        response = render(request, "record.html", forms=forms, generated=f"{timings.now_utc():%Y-%m-%d %H:%M:%S}",
+                          step_timing=timings.step_timing, **rec)
+        if download:
+            name = f"{rec['req'].reference or request_id}_record.html"
+            response.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+        return response
+
+    @app.get("/export/requests.xlsx")
+    def export_requests(status: str = "open", workflow: str = "", owner: str = "", q: str = "",
+                        sort: str = "age", dir: str = "desc"):
+        data = services.export_requests(status=status, workflow=workflow, owner=owner, q=q, sort=sort,
+                                        descending=dir != "asc")
+        return _xlsx(data, f"wft-requests-{env}-{timings.now_utc():%Y%m%d-%H%M}.xlsx")
+
+    @app.get("/export/timings.xlsx")
+    def export_timings(status: str = "all", workflow: str = "", owner: str = "", q: str = "",
+                       sort: str = "created", dir: str = "asc"):
+        data = services.export_timings(status=status, workflow=workflow, owner=owner, q=q, sort=sort,
+                                       descending=dir != "asc")
+        return _xlsx(data, f"wft-step-timings-{env}-{timings.now_utc():%Y%m%d-%H%M}.xlsx")
+
     @app.post("/picklists/refresh")
     def refresh_picklists(request: Request):
         names = [f"{system}.{op}" for system, a in services.adapters.items() for op in sorted(a.list_operations)]
@@ -470,6 +496,14 @@ def _systems(services: Services) -> list[str]:
     from wft.adapters import KNOWN_OPERATIONS
     known = {s.upper() for s in KNOWN_OPERATIONS} | {r.system for r in services.rm.list_off_process()}
     return sorted(known, key=str.lower)
+
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx(data: bytes, filename: str):
+    from fastapi.responses import Response
+    return Response(data, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def _filesize(n: int) -> str:

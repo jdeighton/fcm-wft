@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from wft import __version__, artefacts, engine, timings
+from wft import __version__, artefacts, engine, exports, timings
 from wft.adapters import Adapter, AdapterUnavailable, NotFoundInSystem, compare, split_operation
 from wft.adapters.cache import Picklist, PicklistCache
 from wft import offprocess
@@ -658,6 +658,30 @@ class Services:
             state, defn = self._load(request_id)
             self._record(request_id, defn,
                          engine.record_outcome(state, defn, step_id, outcome, notes, captured, choice))
+
+    # --- exports ---------------------------------------------------------------
+
+    def export_requests(self, **filters) -> bytes:
+        rows = self.open_requests(**filters)
+        return exports.workbook_bytes([("Requests", exports.REQUEST_COLUMNS,
+                                        exports.request_rows(rows, self.registry, self.team.name))])
+
+    def export_timings(self, **filters) -> bytes:
+        states = [row.request for row in self.open_requests(**filters)]
+        return exports.workbook_bytes([
+            ("Step timings", exports.timing_columns(), exports.timing_rows(states, self.registry, self.team.name)),
+            ("Transitions", exports.TRANSITION_COLUMNS, exports.transition_rows(states, self.registry, self.team.name)),
+        ])
+
+    def request_record(self, request_id: str) -> dict:
+        """Everything about a request, for the printable record."""
+        state, defn = self._load(request_id)
+        return {"req": state, "defn": defn, "events": self.rm.history(request_id),
+                "overridden": self.rm.overridden(request_id),
+                "parent": self.rm.get(state.parent["request"]) if state.parent else None,
+                "children": self.children(request_id), "follow_ups": self.follow_ups(request_id),
+                "original": self.rm.get(state.follow_up_of) if state.follow_up_of else None,
+                "off_process": self.off_process_for_request(request_id)}
 
     def hold(self, request_id: str, reason: str) -> None:
         """Hold the request and its active child requests; flag children with work in progress."""

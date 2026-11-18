@@ -43,7 +43,7 @@ database is needed. See the [PRD](docs/PRD.md) for the full design.
 | Published definitions | `python scripts/publish_definitions.py --env prod` | WFT only runs published workflows. Publishing to prod requires `definitions/` to be committed. |
 | TT REST API details | `wft/adapters/tt.py` (`ENDPOINTS`) | The token request and endpoint paths are best understanding, not confirmed from TT's docs. Compare with your existing TT API code, then run `python scripts/tt_smoke.py --env uat` with your own key. |
 | Desktop toasts | A firm Windows desktop | Toasts use PowerShell's built-in toast API; check they appear (and that PowerShell isn't blocked by policy). If not, set `WFT_NOTIFICATIONS=browser`. |
-| Python packages | Artifactory | Install `requirements.txt`. `jsonschema` pulls in `rpds-py`, which needs a Windows wheel. |
+| Python packages | Artifactory | Install `requirements.txt`. `jsonschema` pulls in `rpds-py`, which needs a Windows wheel; `openpyxl` (Excel exports) pulls in `et-xmlfile`. |
 
 ## Running locally
 
