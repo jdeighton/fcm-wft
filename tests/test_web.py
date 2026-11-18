@@ -384,3 +384,35 @@ def test_picklist_prefill_and_verify_pages(tt_services):
     page = client.get(f"/requests/{rid}").text
     assert "Accepted: Agreed with risk" in page and "status-completed" in page
     assert client.post("/picklists/refresh", follow_redirects=False).status_code == 303
+
+
+def test_off_process_pages_and_search(services):
+    client = client_for(services)
+    page = client.get("/off-process").text
+    assert "Log an off-process setup" in page and "Unusual structure not supported" in page and "No off-process records" in page
+    r = client.post("/off-process", data={"system": "TT", "what": "Raised ACC9 max position", "performed_on": "2020-01-02",
+                                          "reason": "urgent", "notes": "Out of hours call"}, follow_redirects=False)
+    assert r.status_code == 303
+    detail = client.get(r.headers["location"]).text
+    assert "OFF-" in detail and "Urgent / out of hours" in detail and "Out of hours call" in detail
+    record_id = r.headers["location"].rsplit("/", 1)[1]
+    client.post(f"/off-process/{record_id}/attachments", files={"file": ("call.txt", b"notes")})
+    assert "call.txt" in client.get(f"/off-process/{record_id}").text
+    assert client.post("/off-process", data={"system": "TT", "what": "x", "performed_on": "2020-01-02",
+                                             "reason": "urgent", "notes": ""}).status_code == 409
+    assert "Raised ACC9" in client.get("/off-process?q=acc9").text
+    home = client.get("/?q=acc9").text
+    assert "Off-process records matching" in home and "Raised ACC9" in home
+
+
+def test_done_outside_control_and_link(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "x")
+    services.submit(rid, {})
+    page = client.get(f"/requests/{rid}").text
+    assert "Done outside WFT" in page and "Log an off-process setup for this request" in page
+    client.post(f"/requests/{rid}/steps/do_the_thing/outside", data={"notes": "Did it in TT"})
+    page = client.get(f"/requests/{rid}").text
+    assert "Done outside WFT by alice" in page and "Did it in TT" in page and "pill-done_outside_tool" in page
+    ref = services.get(rid)[0].reference
+    assert f'value="{ref}"' in client.get(f"/off-process?link={ref}").text

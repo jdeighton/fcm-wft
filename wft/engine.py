@@ -67,10 +67,12 @@ READY = "ready"
 IN_PROGRESS = "in_progress"
 WAITING = "waiting"
 DONE = "done"
+DONE_OUTSIDE = "done_outside_tool"  # done outside WFT (e.g. in the trading system directly), with notes
 SKIPPED = "skipped"
 OPEN_STEP = frozenset({READY, IN_PROGRESS, WAITING})  # steps someone needs to do something about
 WORKABLE = frozenset({READY, IN_PROGRESS})           # steps that can be worked on right now
-FINISHED_STEP = frozenset({DONE, SKIPPED})
+FINISHED_STEP = frozenset({DONE, DONE_OUTSIDE, SKIPPED})
+WORKED_ON = frozenset({IN_PROGRESS, WAITING, DONE, DONE_OUTSIDE})  # someone may have changed something outside WFT
 
 WAIT_REASONS = {
     "client": "Client",
@@ -363,7 +365,7 @@ def amend_impact(state: RequestState, defn: WorkflowDef, new_inputs: dict) -> Im
     flagged, routes = [], []
     for st in state.steps:
         sd = defn.step(st.id)
-        if st.id in initial or st.status not in (IN_PROGRESS, WAITING, DONE):
+        if st.id in initial or st.status not in WORKED_ON:
             continue  # steps not started yet simply use the new data
         hits = sorted({f for f in changed for pattern in sd.raw.get("consumes", ()) if consumes_match(pattern, f)})
         if not hits:
@@ -556,6 +558,16 @@ def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEv
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
     return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id})
+
+
+def complete_outside_tool(state: RequestState, defn: WorkflowDef, step_id: str, notes: str) -> NewEvent:
+    """The step was done outside WFT (for example straight in the trading system). Notes are mandatory."""
+    _workable_step(state, defn, step_id)
+    notes = notes.strip()
+    if not notes:
+        raise CommandError("Say what was done outside WFT, and why")
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event,
+                    payload={"step": step_id, "outside_tool": True, "notes": notes})
 
 
 def start_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
@@ -814,9 +826,12 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         return _replace_step(state, _to(state.step(event.payload["step"]), IN_PROGRESS, event))
 
     if event.type == STEP_COMPLETED:
-        step = _to(_start(state.step(event.payload["step"]), event), DONE, event)
+        outside = event.payload.get("outside_tool", False)
+        step = _start(state.step(event.payload["step"]), event)
+        step = _to(step, DONE_OUTSIDE if outside else DONE, event, note=event.payload.get("notes"))
+        data = {"outside_tool_notes": event.payload["notes"]} if outside else event.payload.get("data", step.data)
         state = _replace_step(state, replace(step, completed_by=event.actor, completed_at=event.ts,
-                                             data=event.payload.get("data", step.data), draft=None))
+                                             data=data, draft=None))
         return _advance(state, defn, event)
 
     raise ValueError(f"Unknown event type {event.type!r}")
@@ -912,7 +927,7 @@ def _raise_flags(state: RequestState, defn: WorkflowDef, event: Event, trigger: 
             if not hook or st.status not in (IN_PROGRESS, WAITING):
                 continue
         elif trigger == CANCEL:
-            if st.status not in (IN_PROGRESS, WAITING, DONE) or (sd.type == "form" and not hook):
+            if st.status not in WORKED_ON or (sd.type == "form" and not hook):
                 continue
         compensation = render((sd.raw.get("compensation") or {}).get("checklist"))
         flags.append(Flag(id=f"{event.event_id}:{st.id}", step=st.id, trigger=trigger,

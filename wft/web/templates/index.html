@@ -77,6 +77,13 @@
   {% endif %}
 </section>
 
+{% if off_process %}
+<section class="card">
+  <h2>Off-process records matching “{{ filters.q }}”</h2>
+  {% with records = off_process %}{% include "_off_process_table.html" %}{% endwith %}
+</section>
+{% endif %}
+
 <section class="card muted small">
   <form method="post" action="/cache/rebuild" class="row">
     <span>Local cache out of step? Rebuild it from the shared drive.</span>

@@ -18,6 +18,7 @@ import yaml
 from wft import __version__
 from wft.definitions import MANIFEST_FILE, PUBLISHED_DIR
 from wft.events import new_id, utc_now
+from wft.configfiles import CONFIG_FILES, REPO_CONFIG_DIR, SHARE_CONFIG_DIR
 from wft.team import REPO_ROLES_FILE, ROLES_FILE, load_team
 from wft.validation import Report, bundle_files, fingerprint, published_manifest, validate_repo
 
@@ -70,20 +71,24 @@ def publish(definitions_dir: Path, share_root: Path, publisher: str, *, username
         raise PublishError(f"Validation failed with {len(report.errors)} error(s); nothing was published", report)
 
     result = PublishResult(report=report)
-    if new_roles.is_file():
-        target = share_root / ROLES_FILE
-        content = new_roles.read_bytes()
+    for name in CONFIG_FILES:
+        source = definitions_dir / REPO_CONFIG_DIR / name
+        if not source.is_file():
+            continue
+        label = name.removesuffix(".yaml")
+        target = share_root / SHARE_CONFIG_DIR / name
+        content = source.read_bytes()
         if target.is_file() and target.read_bytes() == content:
-            result.unchanged.append("roles")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.{new_id()}.tmp")
-            tmp.write_bytes(content)
-            os.replace(tmp, target)  # readers see the old or the new file, never half of one
-            (target.with_name("roles.published.json")).write_text(json.dumps(
-                {"published_at": utc_now(), "published_by": publisher, "git_commit": commit, "git_dirty": dirty},
-                indent=2), encoding="utf-8")
-            result.published.append("roles")
+            result.unchanged.append(label)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.{new_id()}.tmp")
+        tmp.write_bytes(content)
+        os.replace(tmp, target)  # readers see the old or the new file, never half of one
+        target.with_name(f"{label}.published.json").write_text(json.dumps(
+            {"published_at": utc_now(), "published_by": publisher, "git_commit": commit, "git_dirty": dirty},
+            indent=2), encoding="utf-8")
+        result.published.append(label)
     for path in sorted((definitions_dir / "workflows").glob("*.yaml")):
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         key = f"{data['id']}@{data['version']}"

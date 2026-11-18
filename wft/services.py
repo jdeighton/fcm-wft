@@ -10,6 +10,8 @@ from pathlib import Path
 from wft import __version__, engine, timings
 from wft.adapters import Adapter, AdapterUnavailable, NotFoundInSystem, compare, split_operation
 from wft.adapters.cache import Picklist, PicklistCache
+from wft import offprocess
+from wft.configfiles import DEFAULT_REASONS, Reason, ReloadingFile
 from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
@@ -119,7 +121,8 @@ class Services:
                  user: str, host: str, acknowledged_path: Path | None = None,
                  references: ReferenceAllocator | None = None, team: TeamSource | None = None,
                  attachments: AttachmentStore | None = None, adapters: dict[str, Adapter] | None = None,
-                 picklists: PicklistCache | None = None):
+                 picklists: PicklistCache | None = None,
+                 reasons: ReloadingFile[tuple[Reason, ...]] | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
@@ -131,6 +134,7 @@ class Services:
         self.attachments = attachments
         self.adapters = adapters or {}
         self.picklists = picklists
+        self.reasons_source = reasons
         self._lock = threading.Lock()
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -145,6 +149,8 @@ class Services:
             added = self.registry.refresh()
             if added:
                 log.info("Loaded workflow definition(s): %s", ", ".join(added))
+            if self.reasons_source is not None:
+                self.reasons_source.refresh()
             if self.team_source is not None and self.team_source.refresh():
                 log.info("Loaded team configuration: admins %s", ", ".join(self.team.admins) or "none")
             events, cursor = self.repo.read_since(self.rm.cursor())
@@ -165,6 +171,9 @@ class Services:
         for state in self.rm.list_requests():
             if state.submitted_by == self.user and state.reference is None and state.status != engine.DRAFT:
                 self._assign_reference(state.request_id)
+        for rec in self.rm.list_off_process():
+            if rec.recorded_by == self.user and rec.reference is None:
+                self._assign_off_process_reference(rec.record_id)
 
     def _assign_reference(self, request_id: str) -> None:
         if self.references is None:
@@ -432,6 +441,113 @@ class Services:
         self.save_form(request_id, step_id, filled)
         return filled
 
+    # --- done outside WFT -------------------------------------------------------
+
+    def complete_outside_tool(self, request_id: str, step_id: str, notes: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.complete_outside_tool(state, defn, step_id, notes))
+
+    @property
+    def reasons(self) -> tuple[Reason, ...]:
+        return self.reasons_source.value if self.reasons_source is not None else DEFAULT_REASONS
+
+    def reason_label(self, reason_id: str) -> str:
+        return next((r.label for r in self.reasons if r.id == reason_id), reason_id)
+
+    def record_off_process(self, system: str, what: str, performed_on: str, reason: str, notes: str,
+                           linked_request: str = "") -> str:
+        """Log a setup done entirely outside WFT. Returns the record id."""
+        linked = None
+        if linked_request.strip():
+            found = self._find(linked_request)
+            if found is None:
+                raise CommandError(f"No request {linked_request.strip()!r} to link")
+            linked = found.request_id
+        today = timings.now_utc().date()
+        new = offprocess.record(system, what, performed_on, reason, notes, linked, [r.id for r in self.reasons], today)
+        record_id = new_id()
+        with self._lock:
+            self._record(record_id, offprocess.DEFINITION, new)
+        self._assign_off_process_reference(record_id)
+        return record_id
+
+    def _assign_off_process_reference(self, record_id: str) -> None:
+        if self.references is None:
+            return
+        with self._lock:
+            rec = self.get_off_process(record_id)
+            if rec.reference:
+                return
+            try:
+                reference = self.references.allocate(offprocess.REFERENCE_PREFIX, int(rec.recorded_at[:4]))
+            except ReferenceUnavailable as e:
+                log.warning("No reference for off-process record %s yet: %s", record_id, e)
+                return
+            try:
+                self._record(record_id, offprocess.DEFINITION, offprocess.assign_reference(rec, reference))
+            except ReadOnly:
+                log.warning("Allocated %s but couldn't record it", reference)
+
+    def get_off_process(self, record_id: str) -> offprocess.OffProcessRecord:
+        rec = self.rm.get_off_process(record_id)
+        if rec is None:
+            raise NotFound(f"off-process record {record_id}")
+        return rec
+
+    def off_process_records(self, q: str = "", reason: str = "", system: str = "") -> list[offprocess.OffProcessRecord]:
+        q = q.strip().lower()
+        out = []
+        for rec in self.rm.list_off_process():
+            if reason and rec.reason != reason:
+                continue
+            if system and rec.system.lower() != system.lower():
+                continue
+            if q and not any(q in (field or "").lower() for field in
+                             (rec.reference, rec.system, rec.what, rec.notes, self.reason_label(rec.reason),
+                              *(n.text for n in rec.extra_notes))):
+                continue
+            out.append(rec)
+        return out
+
+    def off_process_for_request(self, request_id: str) -> list[offprocess.OffProcessRecord]:
+        return [r for r in self.rm.list_off_process() if r.linked_request == request_id]
+
+    def add_off_process_note(self, record_id: str, text: str) -> None:
+        with self._lock:
+            rec = self.get_off_process(record_id)
+            self._record(record_id, offprocess.DEFINITION, offprocess.add_note(rec, text))
+
+    def add_off_process_attachment(self, record_id: str, name: str, stream) -> str:
+        if self.attachments is None:
+            raise CommandError("Attachments aren't available")
+        if self._read_only_reason is not None:
+            raise ReadOnly("The share is unavailable, so files can't be attached until it's back")
+        self.get_off_process(record_id)
+        try:
+            stored = self.attachments.put(record_id, name, stream)
+        except AttachmentTooLarge as e:
+            raise FileTooLarge(str(e)) from e
+        except OSError as e:
+            self._go_read_only(e)
+            raise ReadOnly("The share became unavailable; the file was not attached") from e
+        with self._lock:
+            rec = self.get_off_process(record_id)
+            self._record(record_id, offprocess.DEFINITION,
+                         offprocess.add_attachment(rec, name, stored.size, stored.sha256, stored.path))
+        return stored.sha256
+
+    def off_process_attachment_file(self, record_id: str, sha256: str):
+        rec = self.get_off_process(record_id)
+        try:
+            att = rec.attachment(sha256)
+        except KeyError:
+            raise NotFound(f"off-process record {record_id} attachment {sha256[:12]}") from None
+        try:
+            return att, self.attachments.open_path(att.path)
+        except FileNotFoundError:
+            raise CommandError(f"{att.name} isn't on the shared drive (is it reachable?)") from None
+
     def hold(self, request_id: str, reason: str) -> None:
         with self._lock:
             state, defn = self._load(request_id)
@@ -619,13 +735,14 @@ class Services:
             raise NotFound(request_id)
         return state, self.registry.get(state.workflow)
 
-    def _record(self, request_id: str, defn: WorkflowDef, new: NewEvent) -> None:
+    def _record(self, request_id: str, defn: WorkflowDef | str, new: NewEvent) -> None:
+        """Stamp and store an event. `defn` is the workflow definition, or a definition key (off-process records)."""
         if self._read_only_reason is not None:
             raise ReadOnly("The share is unavailable, so changes are blocked until it's back")
         event = Event(
             event_id=new_id(), request_id=request_id, seq=new.seq, type=new.type,
             actor=self.user, host=self.host, app_version=__version__,
-            definition=defn.key, ts=utc_now(), payload=new.payload, prev=new.prev,
+            definition=defn if isinstance(defn, str) else defn.key, ts=utc_now(), payload=new.payload, prev=new.prev,
         )
         try:
             self.repo.append(event)

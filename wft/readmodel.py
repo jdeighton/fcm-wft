@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Iterable
 
-from wft import engine
+from wft import engine, offprocess
 from wft.definitions import DefinitionRegistry
 from wft.engine import Attachment, Flag, Hold, Note, RequestState, StepState, Transition
 from wft.events import Event
@@ -46,14 +46,19 @@ CREATE TABLE IF NOT EXISTS conflicts (
     line       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS conflicts_by_actor ON conflicts (actor);
+CREATE TABLE IF NOT EXISTS off_process (
+    record_id    TEXT PRIMARY KEY,
+    performed_on TEXT NOT NULL,
+    state_json   TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS journal_cursor (
     journal TEXT PRIMARY KEY,
     offset  INTEGER NOT NULL
 );
 """
-TABLES = ("events", "requests", "conflicts", "journal_cursor")
+TABLES = ("events", "requests", "conflicts", "off_process", "journal_cursor")
 # Bump when the cache layout or projected state changes; an older cache is dropped and rebuilt.
-CACHE_VERSION = 8
+CACHE_VERSION = 9
 
 
 class ReadModel:
@@ -81,7 +86,8 @@ class ReadModel:
                     touched.add(e.request_id)
             # Requests whose definition wasn't loaded yet when their events arrived get another try.
             unprojected = {r[0] for r in self._db.execute(
-                "SELECT DISTINCT request_id FROM events WHERE request_id NOT IN (SELECT request_id FROM requests)")}
+                "SELECT DISTINCT request_id FROM events WHERE request_id NOT IN (SELECT request_id FROM requests)"
+                " AND request_id NOT IN (SELECT record_id FROM off_process)")}
             for request_id in touched | unprojected:
                 self._project(request_id)
             if cursor is not None:
@@ -92,6 +98,12 @@ class ReadModel:
         events = [Event.from_line(r[0]) for r in self._db.execute(
             "SELECT line FROM events WHERE request_id = ?", (request_id,))]
         created = next((e for e in events if e.seq == 1), events[0])
+        if created.definition == offprocess.DEFINITION:
+            if created.seq == 1:  # otherwise the record itself hasn't been read yet
+                rec = offprocess.replay(events)
+                self._db.execute("INSERT OR REPLACE INTO off_process VALUES (?,?,?)",
+                                 (rec.record_id, rec.performed_on, json.dumps(asdict(rec), sort_keys=True)))
+            return
         try:
             defn = self.registry.get(created.definition)
         except KeyError:
@@ -107,6 +119,16 @@ class ReadModel:
         self._db.executemany(
             "INSERT INTO conflicts VALUES (?,?,?,?)",
             [(e.event_id, e.request_id, e.actor, e.to_line()) for e in result.losers])
+
+    def list_off_process(self) -> list[offprocess.OffProcessRecord]:
+        with self._lock:
+            rows = self._db.execute("SELECT state_json FROM off_process ORDER BY performed_on DESC, record_id DESC").fetchall()
+        return [_load_off_process(r[0]) for r in rows]
+
+    def get_off_process(self, record_id: str) -> offprocess.OffProcessRecord | None:
+        with self._lock:
+            row = self._db.execute("SELECT state_json FROM off_process WHERE record_id = ?", (record_id,)).fetchone()
+        return _load_off_process(row[0]) if row else None
 
     def cursor(self) -> dict[str, int]:
         with self._lock:
@@ -176,3 +198,10 @@ def _load_state(text: str) -> RequestState:
     d["holds"] = tuple(Hold(**h) for h in d["holds"])
     d["flags"] = tuple(Flag(**f) for f in d["flags"])
     return RequestState(**d)
+
+
+def _load_off_process(text: str) -> offprocess.OffProcessRecord:
+    d = json.loads(text)
+    d["attachments"] = tuple(Attachment(**a) for a in d["attachments"])
+    d["extra_notes"] = tuple(Note(**n) for n in d["extra_notes"])
+    return offprocess.OffProcessRecord(**d)

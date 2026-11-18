@@ -1,0 +1,16 @@
+# Why a setup was done outside WFT. Published to the share with the definitions;
+# admins change this list. Each record keeps the reason id, so don't reuse an id for
+# a different meaning (add a new one instead).
+reasons:
+  - id: urgent
+    label: Urgent / out of hours
+  - id: unusual_structure
+    label: Unusual structure not supported
+  - id: tool_gap
+    label: Tool missing workflow or step
+  - id: tool_unavailable
+    label: Tool or share unavailable
+  - id: trading_system_issue
+    label: Trading-system issue
+  - id: other
+    label: Other (notes required)

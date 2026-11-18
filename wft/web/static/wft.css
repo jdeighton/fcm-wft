@@ -107,3 +107,6 @@ button.danger { background:#d92d20; border-color:#d92d20; color:#fff; }
 table.compare tr.differs td { background:rgba(217,45,32,.08); }
 .verify-actions { gap:12px; align-items:end; margin:8px 0; }
 .data-field .label { font-size:.9rem; }
+.pill-done_outside_tool { color:var(--warn); border-color:var(--warn); }
+.outside-note { color:var(--warn); font-size:.9rem; }
+.pre { white-space:pre-wrap; }

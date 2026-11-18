@@ -17,6 +17,8 @@ from wft.engine import MAX_ATTACHMENT_BYTES
 from wft.repository import (AttachmentStore, FileRepository, InstanceLock, InstanceLockError, ReferenceAllocator,
                             default_identity)
 from wft.adapters.cache import PicklistCache
+from wft.configfiles import (DEFAULT_REASONS, REASONS_NAME, REPO_CONFIG_DIR, SHARE_CONFIG_DIR, ReloadingFile,
+                             parse_reasons)
 from wft.adapters.fake import FakeTT
 from wft.adapters.tt import TTAdapter
 from wft.services import Services
@@ -86,16 +88,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"WFT: using UNPUBLISHED definitions from {config.definitions_dir} (development only)")
             registry = DefinitionRegistry.from_repo(config.definitions_dir)
             team = TeamSource(config.definitions_dir / REPO_ROLES_FILE)
+            config_dir = config.definitions_dir / REPO_CONFIG_DIR
         else:
             registry = DefinitionRegistry.from_share(config.share_root)
             team = TeamSource(config.share_root / ROLES_FILE)
+            config_dir = config.share_root / SHARE_CONFIG_DIR
+        reasons = ReloadingFile(config_dir / REASONS_NAME, parse_reasons, DEFAULT_REASONS)
         read_model = ReadModel(config.cache_path, registry)
         services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
                             acknowledged_path=config.home / "acknowledged-conflicts.json",
                             references=ReferenceAllocator(config.share_root), team=team,
                             attachments=AttachmentStore(config.share_root, MAX_ATTACHMENT_BYTES),
                             adapters=build_adapters(config),
-                            picklists=PicklistCache(config.picklist_cache_path, config.picklist_ttl_minutes * 60))
+                            picklists=PicklistCache(config.picklist_cache_path, config.picklist_ttl_minutes * 60),
+                            reasons=reasons)
         services.sync()
         services.start_polling()
         app = create_app(services, config.env, token, port)

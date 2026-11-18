@@ -1,0 +1,15 @@
+<table>
+  <thead><tr><th>Reference</th><th>Done on</th><th>System</th><th>What</th><th>Reason</th><th>By</th></tr></thead>
+  <tbody>
+  {% for r in records %}
+  <tr>
+    <td><a href="/off-process/{{ r.record_id }}">{{ r.reference or "pending" }}</a></td>
+    <td>{{ r.performed_on }}</td>
+    <td>{{ r.system }}</td>
+    <td>{{ r.what }}{% if r.attachments %} <span class="muted small">📎 {{ r.attachments | length }}</span>{% endif %}</td>
+    <td>{{ r.reason | reason_label }}</td>
+    <td>{{ r.recorded_by | person }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>

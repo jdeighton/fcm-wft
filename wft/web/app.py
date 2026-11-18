@@ -30,6 +30,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     templates.env.filters["person"] = lambda u: services.team.name(u) if u else "—"
     templates.env.filters["duration"] = timings.format_duration
     templates.env.filters["filesize"] = _filesize
+    templates.env.filters["reason_label"] = services.reason_label
     templates.env.filters["utc"] = lambda ts: (ts or "")[:16].replace("T", " ")
     templates.env.globals.update(wait_reasons=engine.WAIT_REASONS, step_timing=timings.step_timing,
                                  resolutions=engine.RESOLUTIONS, time_on_hold=timings.time_on_hold,
@@ -103,7 +104,8 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         workflows = [(w, w.runnable_by(__version__)) for w in services.registry.latest()]
         rows = services.open_requests(status, workflow, owner, q, sort, dir != "asc")
         filters = {"status": status, "workflow": workflow, "owner": owner, "q": q, "sort": sort, "dir": dir}
-        return render(request, "index.html", rows=rows, workflows=workflows, filters=filters,
+        off_process = services.off_process_records(q) if q.strip() else []
+        return render(request, "index.html", rows=rows, workflows=workflows, filters=filters, off_process=off_process,
                       people=services.people(), status_filters=list(STATUS_FILTERS))
 
     @app.get("/flags")
@@ -159,6 +161,58 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     def verify_manual(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
         services.complete_verification_manually(request_id, step_id, notes)
         return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/outside")
+    def done_outside(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
+        services.complete_outside_tool(request_id, step_id, notes)
+        return back_to(request_id)
+
+    @app.get("/off-process")
+    def off_process_list(request: Request, q: str = "", reason: str = "", system: str = "", link: str = ""):
+        records = services.off_process_records(q, reason, system)
+        linked = services._find(link) if link else None
+        return render(request, "off_process.html", records=records, reasons=services.reasons,
+                      filters={"q": q, "reason": reason, "system": system}, systems=_systems(services),
+                      today=timings.now_utc().date().isoformat(), link=(linked.reference or linked.request_id) if linked else "")
+
+    @app.post("/off-process")
+    def off_process_create(system: Annotated[str, Form()] = "", what: Annotated[str, Form()] = "",
+                           performed_on: Annotated[str, Form()] = "", reason: Annotated[str, Form()] = "",
+                           notes: Annotated[str, Form()] = "", linked_request: Annotated[str, Form()] = ""):
+        record_id = services.record_off_process(system, what, performed_on, reason, notes, linked_request)
+        return RedirectResponse(f"/off-process/{record_id}", status_code=303)
+
+    @app.get("/off-process/{record_id}")
+    def off_process_detail(request: Request, record_id: str):
+        rec = services.get_off_process(record_id)
+        linked = services.rm.get(rec.linked_request) if rec.linked_request else None
+        return render(request, "off_process_record.html", rec=rec, linked=linked)
+
+    @app.post("/off-process/{record_id}/notes")
+    def off_process_note(record_id: str, text: Annotated[str, Form()] = ""):
+        services.add_off_process_note(record_id, text)
+        return RedirectResponse(f"/off-process/{record_id}", status_code=303)
+
+    @app.post("/off-process/{record_id}/attachments")
+    async def off_process_upload(request: Request, record_id: str):
+        declared = int(request.headers.get("content-length") or 0)
+        if declared > engine.MAX_ATTACHMENT_BYTES + 1024 * 1024:
+            return render(request, "error.html", 413,
+                          message=f"That file is too large: the limit is {engine.MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB")
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not getattr(upload, "filename", ""):
+            raise CommandError("Choose a file to attach")
+        try:
+            services.add_off_process_attachment(record_id, upload.filename, upload.file)
+        finally:
+            await upload.close()
+        return RedirectResponse(f"/off-process/{record_id}", status_code=303)
+
+    @app.get("/off-process/{record_id}/attachments/{sha256}")
+    def off_process_download(record_id: str, sha256: str):
+        att, path = services.off_process_attachment_file(record_id, sha256)
+        return FileResponse(path, filename=att.name, media_type="application/octet-stream")
 
     @app.post("/picklists/refresh")
     def refresh_picklists(request: Request):
@@ -233,9 +287,10 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
             forms[sd.id] = build_fields(sd.form_schema or {}, data or {}, step_errors, f"{sd.id}.", lists)
         verify = {sd.id: _verify_view(state, defn, sd.id) for sd in defn.steps if sd.type == "verify"}
         follow_ups = services.follow_ups(request_id)
+        linked_off_process = services.off_process_for_request(request_id)
         original = services.rm.get(state.follow_up_of) if state.follow_up_of else None
         return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
-                      verify=verify, message=message,
+                      verify=verify, message=message, linked_off_process=linked_off_process,
                       follow_ups=follow_ups, original=original,
                       editable=editable_forms(state, defn), form_errors=errors,
                       history=services.rm.history(request_id))
@@ -330,6 +385,13 @@ STATUS_LABELS = {"open": "Open", "draft": "Draft", "active": "Active", "on_hold"
                  "cancelling": "Cancelling", "completed": "Completed", "cancelled": "Cancelled", "all": "All"}
 
 
+def _systems(services: Services) -> list[str]:
+    """Trading systems to suggest: those WFT knows about, plus any already used in off-process records."""
+    from wft.adapters import KNOWN_OPERATIONS
+    known = {s.upper() for s in KNOWN_OPERATIONS} | {r.system for r in services.rm.list_off_process()}
+    return sorted(known, key=str.lower)
+
+
 def _filesize(n: int) -> str:
     for unit in ("bytes", "KB", "MB"):
         if n < 1024 or unit == "MB":
@@ -341,7 +403,7 @@ def _filesize(n: int) -> str:
 def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
-    return path if path in ("/", "/tasks", "/waiting", "/flags") or path.startswith("/requests/") else default
+    return path if path in ("/", "/tasks", "/waiting", "/flags", "/off-process") or path.startswith("/requests/") else default
 
 
 def _verify_view(state, defn, step_id: str) -> dict:

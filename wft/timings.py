@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from wft.engine import DONE, IN_PROGRESS, READY, SKIPPED, WAITING, Hold, RequestState, StepState
+from wft.engine import DONE, DONE_OUTSIDE, IN_PROGRESS, READY, SKIPPED, WAITING, Hold, RequestState, StepState
 
 
 def parse_ts(ts: str) -> datetime:
@@ -68,9 +68,9 @@ def step_timing(step: StepState, now: datetime | None = None, holds: tuple[Hold,
         end = step.transitions[i + 1].ts if i + 1 < len(step.transitions) else None
         if t.status == READY and ready_at is None:
             ready_at = t.ts
-        if t.status in (IN_PROGRESS, WAITING, DONE) and started_at is None:
+        if t.status in (IN_PROGRESS, WAITING, DONE, DONE_OUTSIDE) and started_at is None:
             started_at = t.ts
-        if t.status in (DONE, SKIPPED):
+        if t.status in (DONE, DONE_OUTSIDE, SKIPPED):
             finished_at = t.ts
             continue
         finished_at = None  # reopened (e.g. reset by an amendment): it isn't finished any more
