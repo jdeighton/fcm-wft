@@ -3,15 +3,21 @@
 {% block content %}
 <section class="card">
   <h2>New request</h2>
+  {% if workflows %}
   <form method="post" action="/requests" class="row">
     <label>Workflow
       <select name="workflow" required>
-        {% for w in workflows %}<option value="{{ w.key }}">{{ w.title }}</option>{% endfor %}
+        {% for w, runnable in workflows %}
+        <option value="{{ w.key }}" {% if not runnable %}disabled{% endif %}>{{ w.title }}{% if not runnable %} (needs WFT {{ w.min_app_version }}: update to use){% endif %}</option>
+        {% endfor %}
       </select>
     </label>
     <label>Title <input name="title" required maxlength="200"></label>
     <button type="submit">Create</button>
   </form>
+  {% else %}
+  <p class="muted">No workflows have been published to this environment yet.</p>
+  {% endif %}
 </section>
 
 <section class="card">

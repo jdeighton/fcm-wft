@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jdeighton/fcm-wft/workflow.schema.json",
+  "title": "WFT workflow definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "title", "steps"],
+  "properties": {
+    "id": { "$ref": "#/$defs/identifier" },
+    "version": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "system": { "type": "string", "description": "Trading system this workflow targets, e.g. tt" },
+    "reference_prefix": { "type": "string", "pattern": "^[A-Z]{2,6}$", "description": "Prefix for readable request references, e.g. LIM" },
+    "min_app_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "inputs_schema": { "$ref": "#/$defs/schemaRef" },
+    "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "schemaRef": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.schema\\.json$", "description": "Path under schemas/" },
+    "checklistRef": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.md$", "description": "Path under checklists/" },
+    "mappingRef": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.ya?ml$", "description": "Path under mappings/" },
+    "fieldPattern": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.([A-Za-z_][A-Za-z0-9_]*|\\*))*$" },
+    "flag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flag"],
+      "properties": { "flag": { "type": "string", "minLength": 1 } }
+    },
+    "stepCommon": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "enum": ["form", "manual", "external_request", "outcome", "verify", "decision", "subworkflow", "approval"] },
+        "title": { "type": "string", "minLength": 1 },
+        "depends_on": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+        "consumes": { "type": "array", "items": { "$ref": "#/$defs/fieldPattern" }, "uniqueItems": true },
+        "checklist": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            { "$ref": "#/$defs/checklistRef" }
+          ]
+        },
+        "on_hold": { "$ref": "#/$defs/flag" },
+        "on_cancel": { "$ref": "#/$defs/flag" },
+        "on_amend": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "flag": { "type": "string" }, "route_to": { "$ref": "#/$defs/identifier" } }
+        },
+        "compensation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "checklist": { "type": "string" },
+            "workflow": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        "artefacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["generator"],
+            "properties": { "generator": { "type": "string" }, "mapping": { "$ref": "#/$defs/mappingRef" } }
+          }
+        }
+      }
+    },
+    "step": {
+      "allOf": [{ "$ref": "#/$defs/stepCommon" }],
+      "unevaluatedProperties": false,
+      "oneOf": [
+        {
+          "properties": { "type": { "const": "manual" } }
+        },
+        {
+          "properties": { "type": { "const": "form" }, "schema": { "$ref": "#/$defs/schemaRef" } },
+          "required": ["schema"]
+        },
+        {
+          "properties": {
+            "type": { "const": "external_request" },
+            "platform": { "type": "string" },
+            "wait_reason": { "enum": ["client", "internal", "krm22", "trading_system", "other"] }
+          },
+          "required": ["platform", "wait_reason"]
+        },
+        {
+          "properties": {
+            "type": { "const": "outcome" },
+            "outcomes": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": { "$ref": "#/$defs/identifier" },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "next": { "$ref": "#/$defs/identifier" },
+                  "choices": { "type": "array", "items": { "enum": ["amend_and_resubmit", "close_rejected"] }, "minItems": 1 },
+                  "only_during": { "enum": ["cancel"] },
+                  "capture": { "type": "string" },
+                  "marker": { "type": "string" }
+                }
+              }
+            }
+          },
+          "required": ["outcomes"]
+        },
+        {
+          "properties": {
+            "type": { "const": "verify" },
+            "adapter": { "type": "string" },
+            "expected": { "type": "string" }
+          },
+          "required": ["adapter"]
+        },
+        {
+          "properties": {
+            "type": { "const": "decision" },
+            "branches": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["when", "next"],
+                "properties": { "when": { "type": "string" }, "next": { "$ref": "#/$defs/identifier" } }
+              }
+            },
+            "default": { "$ref": "#/$defs/identifier" }
+          },
+          "required": ["branches"]
+        },
+        {
+          "properties": {
+            "type": { "const": "subworkflow" },
+            "workflow": { "$ref": "#/$defs/identifier" },
+            "for_each": { "type": "string" },
+            "map_inputs": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          "required": ["workflow"]
+        },
+        {
+          "properties": { "type": { "const": "approval" }, "approver_role": { "type": "string" } }
+        }
+      ]
+    }
+  }
+}

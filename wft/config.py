@@ -27,7 +27,7 @@ class Config:
     share_root: Path
     port: int
     home: Path
-    definitions_dir: Path
+    definitions_dir: Path | None  # development only: run unpublished definitions from a repo folder
 
     @property
     def cache_path(self) -> Path:
@@ -108,6 +108,6 @@ def load_config(env: str, home: Path | None = None,
     except ValueError as e:
         raise ConfigError(f"WFT_PORT must be a number in {env_file}") from e
 
-    definitions_dir = Path(values.get("WFT_DEFINITIONS_DIR") or REPO_ROOT / "definitions")
+    definitions_dir = Path(values["WFT_DEFINITIONS_DIR"]) if values.get("WFT_DEFINITIONS_DIR") else None
     return Config(env=env, share_root=Path(share_root), port=port, home=home,
                   definitions_dir=definitions_dir)

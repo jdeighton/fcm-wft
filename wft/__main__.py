@@ -65,7 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         port = sock.getsockname()[1]
         token = security.new_token()
 
-        registry = DefinitionRegistry.load(config.definitions_dir)
+        if config.definitions_dir:
+            print(f"WFT: using UNPUBLISHED definitions from {config.definitions_dir} (development only)")
+            registry = DefinitionRegistry.from_repo(config.definitions_dir)
+        else:
+            registry = DefinitionRegistry.from_share(config.share_root)
         read_model = ReadModel(config.cache_path, registry)
         services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
                             acknowledged_path=config.home / "acknowledged-conflicts.json")
