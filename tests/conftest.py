@@ -5,7 +5,7 @@ import pytest
 from wft.config import REPO_ROOT
 from wft.definitions import DefinitionRegistry, parse_workflow
 from wft.readmodel import ReadModel
-from wft.repository import FileRepository
+from wft.repository import FileRepository, ReferenceAllocator
 from wft.services import Services
 
 DEMO = "demo_manual@1"
@@ -25,7 +25,8 @@ def share(tmp_path) -> Path:
 
 def make_services(share: Path, cache: Path, registry, user: str = "alice") -> Services:
     rm = ReadModel(cache, registry)
-    svc = Services(FileRepository(share, user), rm, registry, user, "host-" + user)
+    svc = Services(FileRepository(share, user), rm, registry, user, "host-" + user,
+                   references=ReferenceAllocator(share))
     svc.sync()
     return svc
 
@@ -56,3 +57,9 @@ def ticking_clock(monkeypatch):
     counter = iter(range(10**9))
     monkeypatch.setattr(wft.services, "utc_now",
                         lambda: (start + timedelta(milliseconds=next(counter))).isoformat(timespec="milliseconds"))
+
+
+@pytest.fixture
+def forms_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import FORMS, FORMS_FILES, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "forms-defs", FORMS, files=FORMS_FILES))

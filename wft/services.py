@@ -12,11 +12,12 @@ from wft.definitions import DefinitionRegistry, WorkflowDef
 from wft.engine import CommandError, NewEvent, RequestState
 from wft.events import Event, new_id, utc_now
 from wft.readmodel import ReadModel
-from wft.repository import Repository, ShareUnavailable
+from wft.repository import ReferenceAllocator, ReferenceUnavailable, Repository, ShareUnavailable
 
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 10.0
+DEFAULT_REFERENCE_PREFIX = "REQ"
 
 
 class NotFound(Exception):
@@ -37,13 +38,15 @@ class Status:
 
 class Services:
     def __init__(self, repo: Repository, read_model: ReadModel, registry: DefinitionRegistry,
-                 user: str, host: str, acknowledged_path: Path | None = None):
+                 user: str, host: str, acknowledged_path: Path | None = None,
+                 references: ReferenceAllocator | None = None):
         self.repo = repo
         self.rm = read_model
         self.registry = registry
         self.user = user
         self.host = host
         self._acknowledged_path = acknowledged_path
+        self.references = references
         self._lock = threading.Lock()
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
@@ -66,7 +69,34 @@ class Services:
         if self._read_only_reason is not None:
             log.info("Share reachable again; leaving read-only mode")
             self._read_only_reason = self._read_only_since = None
+        self.assign_pending_references()
         return True
+
+    def assign_pending_references(self) -> None:
+        """Give a readable reference to any request I submitted that doesn't have one yet."""
+        if self.references is None or self._read_only_reason is not None:
+            return
+        for state in self.rm.list_requests():
+            if state.submitted_by == self.user and state.reference is None and state.status != engine.DRAFT:
+                self._assign_reference(state.request_id)
+
+    def _assign_reference(self, request_id: str) -> None:
+        if self.references is None:
+            return
+        with self._lock:
+            state, defn = self._load(request_id)
+            if state.reference or state.status == engine.DRAFT:
+                return
+            prefix = defn.raw.get("reference_prefix") or DEFAULT_REFERENCE_PREFIX
+            try:
+                reference = self.references.allocate(prefix, int(state.submitted_at[:4]))
+            except ReferenceUnavailable as e:
+                log.warning("No reference for %s yet: %s", request_id, e)
+                return
+            try:
+                self._record(request_id, defn, engine.assign_reference(state, reference))
+            except ReadOnly:
+                log.warning("Allocated %s but couldn't record it; a new number will be allocated", reference)
 
     def start_polling(self, every: float = POLL_SECONDS) -> None:
         def loop():
@@ -138,6 +168,28 @@ class Services:
         with self._lock:
             self._record(request_id, defn, engine.create_request(defn, title))
         return request_id
+
+    def save_form(self, request_id: str, step_id: str, data: dict) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.save_form(state, defn, step_id, data))
+
+    def submit(self, request_id: str, forms: dict[str, dict]) -> None:
+        """Validate the initial form(s), make the request Active, and give it a readable reference."""
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.submit_request(state, defn, forms))
+        self._assign_reference(request_id)
+
+    def complete_form(self, request_id: str, step_id: str, data: dict) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.complete_form(state, defn, step_id, data))
+
+    def add_note(self, request_id: str, text: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.add_note(state, text))
 
     def set_checklist_item(self, request_id: str, step_id: str, index: int, checked: bool) -> None:
         with self._lock:

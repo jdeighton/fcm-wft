@@ -12,6 +12,7 @@ checklist refs under `checklists/`, mapping refs under `mappings/`.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -40,6 +41,7 @@ class StepDef:
     title: str
     checklist: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
+    form_schema: dict | None = field(default=None, compare=False, repr=False)  # loaded JSON Schema of a form step
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -103,9 +105,13 @@ def parse_workflow(data: dict, base: Path | None = None) -> WorkflowDef:
                 if base is None:
                     raise DefinitionError(f"Step {s['id']!r}: checklist file {checklist!r} needs a base folder")
                 checklist = parse_checklist_md((base / "checklists" / checklist).read_text(encoding="utf-8"))
+            form_schema = None
+            if isinstance(s.get("schema"), str) and base is not None:
+                form_schema = json.loads((base / "schemas" / s["schema"]).read_text(encoding="utf-8"))
             steps.append(StepDef(
                 id=s["id"], type=s["type"], title=s.get("title", s["id"]),
-                checklist=tuple(checklist), depends_on=tuple(s.get("depends_on", ())), raw=s,
+                checklist=tuple(checklist), depends_on=tuple(s.get("depends_on", ())),
+                form_schema=form_schema, raw=s,
             ))
         return WorkflowDef(id=data["id"], version=int(data["version"]), title=data["title"],
                            steps=tuple(steps), min_app_version=data.get("min_app_version"), raw=data)

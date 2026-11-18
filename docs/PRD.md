@@ -301,7 +301,8 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
   journals\YYYY-MM\<username>.jsonl
   archive\YYYY\...                 # journals older than 12 months
   attachments\<request-id>\<sha256>_<filename>
-  locks\                           # short-lived lock files (ID allocation)
+  locks\                           # short-lived lock files (reference allocation)
+  meta\references\<PREFIX>-<YYYY>.txt  # last readable reference number issued
   instance-locks\<username>.lock   # one running instance per user
   meta\min_app_version
   meta\environment                # "prod" or "uat"; must match the running env
@@ -312,7 +313,8 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 - **NFR-3.2 Events are JSON lines**, each with: event ID, request ID, per-request sequence number, the id of the event it was decided on top of (`prev`), event type, actor, host, app version, definition version, UTC timestamp, payload, schema version.
 - **NFR-3.3 Readers poll** all journal files (size/mtime check) every 5–15 s and read only new bytes; a trailing partial line is ignored until complete. File-system watch notifications are not relied on.
 - **NFR-3.4 State is derived by replay**, ordered per request by sequence number, not wall-clock time. Conflicting events (same parent sequence) are resolved deterministically (earliest UTC timestamp, then event ID); the losing action, and any later action built on it, is surfaced to its author as a conflict to retry. Dismissed conflicts are remembered in the user's profile so a cache rebuild doesn't resurface them.
-- **NFR-3.5 Locks** are used only for readable-ID allocation and instance exclusivity. Lock files contain owner metadata and expire.
+- **NFR-3.5 Locks** are used only for readable-reference allocation and instance exclusivity. Lock files contain owner metadata and expire.
+- **NFR-3.5a Annotations:** readable references and notes are recorded outside the per-request sequence, so they never conflict with other users' actions.
 - **NFR-3.6 Share unavailable** → instance switches to **read-only mode** with a prominent banner, serving the last cached state; writes are blocked (no offline queueing). Users fall back to the manual process.
 - **NFR-3.7** All storage access goes through a `Repository` interface so the backend can be swapped (e.g. for a database) later.
 - **NFR-3.8 Retention:** all data kept indefinitely; journals older than 12 months moved to `archive\YYYY\` by an admin script and still read for history.
@@ -430,7 +432,7 @@ Sub-workflow syntax (supported by engine in R1, used in later releases):
 Rules:
 - Requests are pinned to the definition `id` + `version` they started on.
 - Definitions reference schemas, checklists (Markdown) and mappings by relative path: schema refs under `schemas/`, checklist refs under `checklists/`, mapping refs under `mappings/`. A checklist may be an inline list or a Markdown file of `- item` lines.
-- A workflow with an `inputs_schema` needs sample inputs at `samples/<id>.yaml` for the validator's dry run.
+- Every `form` step needs sample data for the validator's dry run: `samples/<id>.yaml` maps each form step id to sample form data. Form steps with no `depends_on` are the request's initial (capture) forms, filled in while it is a Draft; their data becomes the request's inputs and must match `inputs_schema` when one is set.
 - Expressions are a restricted templating subset (no arbitrary code): `{{ path | filter }}` with paths rooted at `inputs`, `steps`, `item`, `request`, the filters `default`, `join`, `upper`, `lower`, `length`, and `==` / `!=` comparisons.
 - The format is defined by `wft/schemas/workflow.schema.json`.
 - Each version is published to the share as its own immutable folder, `definitions/workflows/<id>/<version>/`, containing the workflow, only the files it references, and a `manifest.json` (file hashes, publisher, git commit). Instances load every published version and pick up new ones while running.

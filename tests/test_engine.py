@@ -16,12 +16,16 @@ def stamp(request_id, defn, new, actor="alice", ts=None):
 
 
 def run(defn, *commands):
-    """Apply commands in turn, returning (events, state)."""
+    """Apply commands in turn, returning (events, state). A create is followed by a submit (Draft -> Active)."""
     events, state = [], None
     for cmd in commands:
         e = stamp("r1", defn, cmd(state))
         events.append(e)
         state = engine.apply(state, e, defn)
+        if e.type == engine.REQUEST_CREATED:
+            e = stamp("r1", defn, engine.submit_request(state, defn, {}))
+            events.append(e)
+            state = engine.apply(state, e, defn)
     return events, state
 
 
@@ -151,8 +155,8 @@ def test_events_after_a_gap_wait_for_their_predecessor(registry):
         lambda s: engine.set_checklist_item(s, defn, "do_the_thing", 0, True),
         lambda s: engine.set_checklist_item(s, defn, "do_the_thing", 1, True),
     )
-    partial = engine.replay([events[0], events[2]], defn)
-    assert partial.state.seq == 1 and partial.losers == ()
+    partial = engine.replay([events[0], events[1], events[3]], defn)
+    assert partial.state.seq == 2 and partial.losers == ()
     assert engine.replay(events, defn).state.step("do_the_thing").ticked == {0, 1}
 
 
