@@ -16,6 +16,7 @@
     {% if req.status != "Draft" and not req.reference %}· reference pending{% endif %}
     {% if req.holds %}· on hold {{ time_on_hold(req) | duration }} in total{% endif %}
   </p>
+  {% if parent %}<p class="small">Sub-request of <a href="/requests/{{ parent.request_id }}#step-{{ req.parent.step }}">{{ parent.reference or parent.title }}</a> {{ parent.title if parent.reference else "" }}</p>{% endif %}
   {% if original %}<p class="small">Follow-up to <a href="/requests/{{ original.request_id }}">{{ original.reference or original.title }}</a></p>{% endif %}
   {% if linked_off_process %}<p class="small">Off-process records: {% for r in linked_off_process %}<a href="/off-process/{{ r.record_id }}">{{ r.reference or "pending" }}</a> ({{ r.what }}){% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
   {% if follow_ups %}<p class="small">Follow-ups: {% for f in follow_ups %}<a href="/requests/{{ f.request_id }}">{{ f.reference or f.title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
@@ -89,7 +90,7 @@
   {% for f in req.flags %}
   <div class="flag flag-{{ f.resolution or 'open' }}">
     <p><span class="pill {{ 'pill-flag' if f.blocking else ('pill-waiting' if f.resolution == 'deferred' else 'pill-done') }}">{{ resolutions[f.resolution] if f.resolution else "Open" }}</span>
-      <strong>{{ defn.step(f.step).title if f.step else "Request" }}</strong>: {{ f.action }}
+      <strong>{{ defn.step(f.step).title if f.step else "Request" }}</strong>: {{ f.action }}{% if f.child %} <a href="/requests/{{ f.child }}">open sub-request</a>{% endif %}
       <span class="muted small">({{ f.trigger }} by {{ f.raised_by | person }}, {{ f.raised_at | utc }} UTC)</span></p>
     {% if f.compensation %}<p class="small">To roll back: {{ f.compensation }}</p>{% endif %}
     {% if f.resolution %}<p class="small muted">{{ resolutions[f.resolution] }} by {{ f.resolved_by | person }} at {{ f.resolved_at | utc }} UTC: {{ f.notes }}{% if f.linked_request %} · linked <a href="/requests/{{ f.linked_request }}">request</a>{% endif %}</p>{% endif %}
@@ -182,6 +183,50 @@
     {{ readonly(forms[s.id]) }}
     {% else %}
     <p class="muted">Not filled in yet.</p>
+    {% endif %}
+  {% elif sd.type == "subworkflow" %}{% set kids = (s.data or {}).get("children") %}
+    {% if kids is none %}
+    <p class="muted">Starts a <strong>{{ sd.raw.workflow }}</strong> sub-request{{ " for each item" if sd.raw.for_each else "" }} when this step is reached.</p>
+    {% if workable %}<form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/subworkflow/start"><button type="submit" class="secondary">Start sub-requests now</button></form>{% endif %}
+    {% elif kids %}
+    <table>
+      <thead><tr><th>Sub-request</th><th>Status</th><th>Current step</th></tr></thead>
+      <tbody>{% for k in kids %}{% set c = children.get(k.id) %}
+        <tr><td><a href="/requests/{{ k.id }}">{{ (c.reference if c else none) or k.title }}</a>{% if c and c.reference %} <span class="muted small">{{ k.title }}</span>{% endif %}</td>
+            <td>{% if c %}<span class="status status-{{ c.status | lower }}">{{ c.status }}</span>{% else %}<span class="muted">not read yet</span>{% endif %}</td>
+            <td>{{ (c.current_step if c else none) or "—" }}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+    {% if s.status != "done" %}<p class="muted small">This step completes when every sub-request is completed. If one is cancelled, start a replacement or mark this step done outside WFT.</p>{% endif %}
+    {% else %}<p class="muted">No sub-requests were needed (nothing to do for each item).</p>{% endif %}
+  {% elif sd.type == "decision" %}
+    {% if s.data and s.data.chosen %}
+    <p>Went on to <strong>{{ defn.step(s.data.chosen).title }}</strong> <span class="muted small">({{ s.data.rule }})</span></p>
+    {% elif workable %}
+    <p class="muted">No rule settled this decision. Choose how to go on:</p>
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/decision" class="row inline-form">
+      <select name="chosen">{% for b in sd.raw.branches %}<option value="{{ b.next }}">{{ defn.step(b.next).title }}</option>{% endfor %}{% if sd.raw.default %}<option value="{{ sd.raw.default }}">{{ defn.step(sd.raw.default).title }}</option>{% endif %}</select>
+      <button type="submit" class="secondary">Go this way</button>
+    </form>
+    {% else %}<p class="muted">Decides automatically when reached.</p>{% endif %}
+  {% elif sd.type == "approval" %}
+    {% for r in (s.data or {}).get("rejections", []) %}
+    <p class="small warn">Not approved by {{ r.by | person }} at {{ r.ts | utc }} UTC: {{ r.notes }}</p>
+    {% endfor %}
+    {% if s.status == "done" %}
+    <p>Approved by <strong>{{ s.completed_by | person }}</strong> at {{ s.completed_at | utc }} UTC{% if s.data and s.data.notes %}: {{ s.data.notes }}{% endif %}</p>
+    {% elif workable %}
+    <p class="muted small">{% if sd.raw.approver_role == "admin" %}An admin must approve. {% endif %}{% if not sd.raw.allow_submitter %}The person who submitted the request can't approve it.{% endif %}</p>
+    <div class="row verify-actions">
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/approve" class="row inline-form">
+        <label>Notes (optional) <input name="notes" maxlength="500"></label>
+        <button type="submit">Approve</button>
+      </form>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/reject" class="row inline-form">
+        <label>Why not <input name="notes" required maxlength="500"></label>
+        <button type="submit" class="secondary">Don't approve</button>
+      </form>
+    </div>
     {% endif %}
   {% elif sd.type == "verify" %}{% set v = verify[s.id] %}
     <p>Checks <strong>{{ v.key if v.key not in (none, "") else "—" }}</strong> with <code>{{ v.operation }}</code>.</p>

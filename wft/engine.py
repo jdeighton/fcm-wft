@@ -30,6 +30,9 @@ STEP_STARTED = "step_started"
 STEP_WAITING = "step_waiting"    # payload: step, reason, note
 STEP_RESUMED = "step_resumed"
 STEP_COMPLETED = "step_completed"
+SUBWORKFLOW_STARTED = "subworkflow_started"  # payload: step, workflow, children [{id, title, index}]
+DECISION_MADE = "decision_made"              # payload: step, chosen (when no rule matched)
+APPROVAL_REJECTED = "approval_rejected"      # payload: step, notes
 VERIFY_CHECKED = "verify_checked"  # payload: step, check {outcome, key, expected, actual, differences, source, error}
 REFERENCE_ASSIGNED = "reference_assigned"
 NOTE_ADDED = "note_added"
@@ -42,7 +45,7 @@ ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASS
 ANNOTATION_SEQ = 0
 
 # Step types this version of the engine can run. Definitions using others fail validation.
-SUPPORTED_STEP_TYPES = frozenset({"manual", "form", "verify"})
+SUPPORTED_STEP_TYPES = frozenset({"manual", "form", "verify", "subworkflow", "decision", "approval"})
 
 # Outcomes of checking a verify step against a trading system
 MATCH, MISMATCH, UNAVAILABLE = "match", "mismatch", "unavailable"
@@ -168,6 +171,7 @@ class Hold:
     by: str
     reason: str
     end: str | None = None
+    by_parent: str | None = None  # set when the hold came from the parent request being held
 
 
 @dataclass(frozen=True)
@@ -185,6 +189,7 @@ class Flag:
     linked_request: str | None = None
     resolved_by: str | None = None
     resolved_at: str | None = None
+    child: str | None = None  # the child request this flag is about, if any
 
     @property
     def blocking(self) -> bool:
@@ -221,6 +226,7 @@ class RequestState:
     cancel_reason: str | None = None
     cancelled_at: str | None = None
     follow_up_of: str | None = None
+    parent: dict | None = None  # {request, step, index} for a child request started by a sub-workflow step
 
     def flag(self, flag_id: str) -> Flag:
         for f in self.flags:
@@ -303,14 +309,137 @@ def _friendly(e: jsonschema.ValidationError) -> str:
 
 # --- commands -------------------------------------------------------------
 
-def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = None) -> NewEvent:
+def create_request(defn: WorkflowDef, title: str, follow_up_of: str | None = None,
+                   parent: dict | None = None) -> NewEvent:
     title = title.strip()
     if not title:
         raise CommandError("A title is required")
-    payload = {"title": title}
+    payload: dict[str, Any] = {"title": title}
     if follow_up_of:
         payload["follow_up_of"] = follow_up_of
+    if parent:
+        payload["parent"] = parent
+        payload["auto"] = True
     return NewEvent(REQUEST_CREATED, seq=1, payload=payload)
+
+
+# --- sub-workflows ---------------------------------------------------------------
+
+def plan_children(state: RequestState, defn: WorkflowDef, step_id: str) -> list[dict]:
+    """The child requests a sub-workflow step should start: [{title, inputs, index}], one per `for_each` item."""
+    from wft.expressions import parse
+    sd = defn.step(step_id)
+    ctx = context(state)
+    items: list[Any] = [None]
+    if sd.raw.get("for_each"):
+        value = parse(sd.raw["for_each"]).render(ctx)
+        items = list(value) if isinstance(value, (list, tuple)) else []
+    out = []
+    for index, item in enumerate(items):
+        item_ctx = {**ctx, "item": item}
+        rendered = {k: parse(v).render(item_ctx) if isinstance(v, str) else v
+                    for k, v in (sd.raw.get("map_inputs") or {}).items()}
+        inputs = {k: v for k, v in rendered.items() if v not in (None, "")}  # missing values are left out
+        label = _item_label(item, index) if sd.raw.get("for_each") else None
+        title = f"{state.reference or state.title} – {sd.title}" + (f" – {label}" if label else "")
+        out.append({"title": title, "inputs": inputs, "index": index})
+    return out
+
+
+def _item_label(item: Any, index: int) -> str:
+    if isinstance(item, dict):
+        for key in ("name", "title", "id", "account", "username"):
+            if item.get(key):
+                return str(item[key])
+        return f"#{index + 1}"
+    return str(item) if item not in (None, "") else f"#{index + 1}"
+
+
+def start_subworkflow(state: RequestState, defn: WorkflowDef, step_id: str, workflow: str,
+                      children: list[dict]) -> NewEvent:
+    step = _workable_step(state, defn, step_id)
+    if defn.step(step_id).type != "subworkflow":
+        raise CommandError(f"Step {step_id!r} is not a sub-workflow")
+    if (step.data or {}).get("children") is not None:
+        raise CommandError("Sub-requests have already been started for this step")
+    return NewEvent(SUBWORKFLOW_STARTED, seq=state.seq + 1, prev=state.last_event, payload={
+        "step": step_id, "workflow": workflow, "auto": True,
+        "children": [{"id": c["id"], "title": c["title"], "index": c["index"]} for c in children]})
+
+
+def complete_subworkflow(state: RequestState, defn: WorkflowDef, step_id: str,
+                         child_status: dict[str, tuple[str, str | None]]) -> NewEvent:
+    """Join: complete the step once every child request is Completed. `child_status`: id -> (status, reference)."""
+    step = _workable_step(state, defn, step_id)
+    children = (step.data or {}).get("children")
+    if children is None:
+        raise CommandError("Sub-requests haven't been started yet")
+    not_done = [c for c in children if child_status.get(c["id"], ("?", None))[0] != COMPLETED]
+    if not_done:
+        raise CommandError(f"{len(not_done)} sub-request(s) not completed yet")
+    summary = [{**c, "status": child_status[c["id"]][0], "reference": child_status[c["id"]][1]} for c in children]
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={
+        "step": step_id, "auto": True, "data": {**(step.data or {}), "children": summary}})
+
+
+# --- decisions and approvals -----------------------------------------------------
+
+def decision_targets(sd: StepDef) -> list[str]:
+    targets = [b["next"] for b in sd.raw.get("branches", ())]
+    if sd.raw.get("default"):
+        targets.append(sd.raw["default"])
+    return list(dict.fromkeys(targets))
+
+
+def evaluate_decision(state: RequestState, sd: StepDef) -> tuple[str, str] | None:
+    """(chosen step, which rule) for a decision, or None if no rule matches and there's no default."""
+    from wft.expressions import ExpressionError, parse
+    if sd.raw.get("_choose_by_hand"):  # the validator's dry run explores every option instead
+        return None
+    ctx = context(state)
+    for i, branch in enumerate(sd.raw.get("branches", ())):
+        try:
+            if parse(branch["when"]).render(ctx):
+                return branch["next"], f"rule {i + 1}: {branch['when']}"
+        except ExpressionError:
+            continue
+    if sd.raw.get("default"):
+        return sd.raw["default"], "default"
+    return None
+
+
+def choose_branch(state: RequestState, defn: WorkflowDef, step_id: str, chosen: str) -> NewEvent:
+    """For a decision no rule settled: a person picks the way on."""
+    _workable_step(state, defn, step_id)
+    sd = defn.step(step_id)
+    if sd.type != "decision":
+        raise CommandError(f"Step {step_id!r} is not a decision")
+    if chosen not in decision_targets(sd):
+        raise CommandError("Choose one of the decision's options")
+    return NewEvent(DECISION_MADE, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id, "chosen": chosen})
+
+
+def approve(state: RequestState, defn: WorkflowDef, step_id: str, me: str, notes: str = "") -> NewEvent:
+    step = _approval_step(state, defn, step_id)
+    if me == state.submitted_by and not defn.step(step_id).raw.get("allow_submitter"):
+        raise CommandError("Someone other than the person who submitted the request must approve it")
+    return NewEvent(STEP_COMPLETED, seq=state.seq + 1, prev=state.last_event, payload={
+        "step": step_id, "data": {**(step.data or {}), "approval": "approved", "notes": notes.strip() or None}})
+
+
+def reject_approval(state: RequestState, defn: WorkflowDef, step_id: str, notes: str) -> NewEvent:
+    _approval_step(state, defn, step_id)
+    notes = notes.strip()
+    if not notes:
+        raise CommandError("Say why it isn't approved, so it can be put right")
+    return NewEvent(APPROVAL_REJECTED, seq=state.seq + 1, prev=state.last_event, payload={"step": step_id, "notes": notes})
+
+
+def _approval_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepState:
+    step = _workable_step(state, defn, step_id)
+    if defn.step(step_id).type != "approval":
+        raise CommandError(f"Step {step_id!r} is not an approval")
+    return step
 
 
 # --- amendments --------------------------------------------------------------
@@ -461,28 +590,41 @@ def _verify_step(state: RequestState, defn: WorkflowDef, step_id: str) -> StepSt
     return step
 
 
-def hold_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
+def hold_request(state: RequestState, defn: WorkflowDef, reason: str, child_flags: list[dict] = (),
+                 by_parent: str | None = None) -> NewEvent:
+    """`child_flags` ([{child, step, action}]) are worked out by the caller, which can see the child requests."""
     if state.status != ACTIVE:
         raise CommandError(f"Only Active requests can be put on hold (this one is {state.status})")
     reason = reason.strip()
     if not reason:
         raise CommandError("Give a reason for the hold")
-    return NewEvent(REQUEST_HELD, seq=state.seq + 1, prev=state.last_event, payload={"reason": reason})
+    payload: dict[str, Any] = {"reason": reason}
+    if child_flags:
+        payload["child_flags"] = list(child_flags)
+    if by_parent:
+        payload.update(by_parent=by_parent, auto=True)
+    return NewEvent(REQUEST_HELD, seq=state.seq + 1, prev=state.last_event, payload=payload)
 
 
-def resume_request(state: RequestState, defn: WorkflowDef) -> NewEvent:
+def resume_request(state: RequestState, defn: WorkflowDef, auto: bool = False) -> NewEvent:
     if state.status != ON_HOLD:
         raise CommandError(f"Request isn't on hold (it's {state.status})")
-    return NewEvent(REQUEST_RESUMED, seq=state.seq + 1, prev=state.last_event)
+    return NewEvent(REQUEST_RESUMED, seq=state.seq + 1, prev=state.last_event, payload={"auto": True} if auto else {})
 
 
-def cancel_request(state: RequestState, defn: WorkflowDef, reason: str) -> NewEvent:
+def cancel_request(state: RequestState, defn: WorkflowDef, reason: str, child_flags: list[dict] = (),
+                   auto: bool = False) -> NewEvent:
     if state.status not in (DRAFT, ACTIVE, ON_HOLD):
         raise CommandError(f"A {state.status} request can't be cancelled")
     reason = reason.strip()
     if not reason:
         raise CommandError("Give a reason for cancelling")
-    return NewEvent(REQUEST_CANCELLED, seq=state.seq + 1, prev=state.last_event, payload={"reason": reason})
+    payload: dict[str, Any] = {"reason": reason}
+    if child_flags:
+        payload["child_flags"] = list(child_flags)
+    if auto:
+        payload["auto"] = True
+    return NewEvent(REQUEST_CANCELLED, seq=state.seq + 1, prev=state.last_event, payload=payload)
 
 
 def resolve_flag(state: RequestState, flag_id: str, resolution: str, notes: str = "",
@@ -554,6 +696,8 @@ def complete_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEv
         raise CommandError(f"Step {step_id!r} is a form; submit the form to complete it")
     if defn.step(step_id).type == "verify":
         raise CommandError(f"Step {step_id!r} is a check; check it, then accept it or complete it manually")
+    if defn.step(step_id).type in ("subworkflow", "decision", "approval"):
+        raise CommandError(f"Step {step_id!r} completes itself ({defn.step(step_id).type})")
     missing = len(defn.step(step_id).checklist) - len(step.ticked)
     if missing:
         raise CommandError(f"{missing} checklist item(s) still to tick")
@@ -706,6 +850,16 @@ def actions(state: RequestState, defn: WorkflowDef,
         elif sd.type == "verify":
             out.append((f"verify {step.id}",
                         [lambda s, sid=step.id: complete_verification_manually(s, defn, sid, "dry run")]))
+        elif sd.type == "subworkflow":
+            out.append((f"run sub-requests {step.id}", [
+                lambda s, sid=step.id: start_subworkflow(s, defn, sid, sd.raw["workflow"], []),
+                lambda s, sid=step.id: complete_subworkflow(s, defn, sid, {})]))
+        elif sd.type == "decision":
+            for target in decision_targets(sd):
+                out.append((f"choose {target} at {step.id}",
+                            [lambda s, sid=step.id, t=target: choose_branch(s, defn, sid, t)]))
+        elif sd.type == "approval":
+            out.append((f"approve {step.id}", [lambda s, sid=step.id: approve(s, defn, sid, "dry-run-approver")]))
     return out
 
 
@@ -757,7 +911,7 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
             status=DRAFT, created_by=event.actor, created_at=event.ts, updated_at=event.ts,
             seq=event.seq, last_event=event.event_id, owner=event.actor,
             steps=tuple(StepState(s.id, PENDING) for s in defn.steps),
-            follow_up_of=event.payload.get("follow_up_of"),
+            follow_up_of=event.payload.get("follow_up_of"), parent=event.payload.get("parent"),
         )
 
     if state is None:
@@ -769,15 +923,15 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
     state = replace(state, seq=event.seq, last_event=event.event_id, updated_at=event.ts)
 
     if event.type == REQUEST_HELD:
-        flags = _raise_flags(state, defn, event, HOLD)
-        return replace(state, status=ON_HOLD, flags=state.flags + flags,
-                       holds=state.holds + (Hold(event.ts, event.actor, event.payload["reason"]),))
+        flags = _raise_flags(state, defn, event, HOLD) + _child_flags(event, HOLD)
+        hold = Hold(event.ts, event.actor, event.payload["reason"], by_parent=event.payload.get("by_parent"))
+        return replace(state, status=ON_HOLD, flags=state.flags + flags, holds=state.holds + (hold,))
 
     if event.type == REQUEST_RESUMED:
         return replace(state, status=ACTIVE, holds=_end_hold(state.holds, event.ts))
 
     if event.type == REQUEST_CANCELLED:
-        flags = _raise_flags(state, defn, event, CANCEL) if state.status != DRAFT else ()
+        flags = (_raise_flags(state, defn, event, CANCEL) if state.status != DRAFT else ()) + _child_flags(event, CANCEL)
         state = replace(state, status=CANCELLING, flags=state.flags + flags, holds=_end_hold(state.holds, event.ts),
                         cancel_reason=event.payload["reason"])
         return _settle(state, event.ts)
@@ -809,6 +963,22 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         idx = event.payload["index"]
         ticked = step.ticked | {idx} if event.payload["checked"] else step.ticked - {idx}
         return _replace_step(state, replace(step, ticked=frozenset(ticked)))
+
+    if event.type == SUBWORKFLOW_STARTED:
+        step = _start(state.step(event.payload["step"]), event)
+        data = {"workflow": event.payload["workflow"], "children": event.payload["children"]}
+        return _replace_step(state, replace(step, data={**(step.data or {}), **data}))
+
+    if event.type == DECISION_MADE:
+        sd = defn.step(event.payload["step"])
+        state = _resolve_decision(state, sd, event, event.payload["chosen"], "chosen by hand")
+        return _advance(state, defn, event)
+
+    if event.type == APPROVAL_REJECTED:
+        step = _start(state.step(event.payload["step"]), event)
+        rejections = [*(step.data or {}).get("rejections", ()),
+                      {"ts": event.ts, "by": event.actor, "notes": event.payload["notes"]}]
+        return _replace_step(state, replace(step, data={**(step.data or {}), "rejections": rejections}))
 
     if event.type == VERIFY_CHECKED:
         step = _start(state.step(event.payload["step"]), event)
@@ -936,6 +1106,29 @@ def _raise_flags(state: RequestState, defn: WorkflowDef, event: Event, trigger: 
     return tuple(flags)
 
 
+def _child_flags(event: Event, trigger: str) -> tuple[Flag, ...]:
+    """Flags about child requests, worked out by the caller (which can see them) and carried in the event."""
+    return tuple(Flag(id=f"{event.event_id}:{c['step']}:{c['child']}", step=c["step"], trigger=trigger,
+                      action=c["action"], compensation=None, raised_by=event.actor, raised_at=event.ts,
+                      child=c["child"])
+                 for c in event.payload.get("child_flags", ()))
+
+
+def _resolve_decision(state: RequestState, sd: StepDef, event: Event, chosen: str, rule: str) -> RequestState:
+    """Finish a decision: the chosen way on continues; the other options are skipped."""
+    step = state.step(sd.id)
+    if step.status == READY:
+        step = _to(step, IN_PROGRESS, event)
+    step = _to(step, DONE, event)
+    state = _replace_step(state, replace(step, data={"chosen": chosen, "rule": rule},
+                                         completed_by=event.actor, completed_at=event.ts))
+    for target in decision_targets(sd):
+        other = state.step(target)
+        if target != chosen and other.status == PENDING:
+            state = _replace_step(state, _to(other, SKIPPED, event, reason=f"not chosen by {sd.id}"))
+    return state
+
+
 def _settle(state: RequestState, ts: str) -> RequestState:
     """Reach a final state once nothing (no open flag) stands in the way."""
     if state.blocking_flags:
@@ -965,13 +1158,28 @@ def _advance(state: RequestState, defn: WorkflowDef, event: Event) -> RequestSta
     """Make pending steps ready once their dependencies are finished; complete the request when all are."""
     if state.status == DRAFT:
         return state
-    finished = {s.id for s in state.steps if s.status in FINISHED_STEP}
-    steps = tuple(
-        _to(s, READY, event)
-        if s.status == PENDING and set(defn.step(s.id).depends_on) <= finished else s
-        for s in state.steps
-    )
-    return _settle(replace(state, steps=steps), event.ts)
+    changed = True
+    while changed:
+        changed = False
+        # Decisions settle themselves as soon as they're ready, when a rule (or the default) applies.
+        for st in state.steps:
+            sd = defn.step(st.id)
+            if st.status == READY and sd.type == "decision" and state.status == ACTIVE:
+                outcome = evaluate_decision(state, sd)
+                if outcome:
+                    state = _resolve_decision(state, sd, event, *outcome)
+                    changed = True
+        by_id = {s.id: s for s in state.steps}
+        for st in state.steps:
+            deps = defn.step(st.id).depends_on
+            if st.status != PENDING or not all(by_id[d].status in FINISHED_STEP for d in deps):
+                continue
+            # A step whose every dependency was skipped (a branch not taken) is skipped too.
+            skipped = bool(deps) and all(by_id[d].status == SKIPPED for d in deps)
+            state = _replace_step(state, _to(st, SKIPPED if skipped else READY, event,
+                                             reason="branch not taken" if skipped else None))
+            changed = True
+    return _settle(state, event.ts)
 
 
 @dataclass(frozen=True)

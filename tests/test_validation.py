@@ -92,8 +92,8 @@ def test_duplicate_step_ids(tmp_path):
 
 def test_unsupported_step_types_are_reported(tmp_path):
     d = wf()
-    d["steps"].append({"id": "c", "type": "approval", "depends_on": ["b"]})
-    assert has(errors(tmp_path, d), "step type(s) approval not supported")
+    d["steps"].append({"id": "c", "type": "outcome", "depends_on": ["b"], "outcomes": {"ok": {}}})
+    assert has(errors(tmp_path, d), "step type(s) outcome not supported")
 
 
 def test_outcome_routes_must_exist(tmp_path):

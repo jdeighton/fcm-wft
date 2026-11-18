@@ -416,3 +416,26 @@ def test_done_outside_control_and_link(services):
     assert "Done outside WFT by alice" in page and "Did it in TT" in page and "pill-done_outside_tool" in page
     ref = services.get(rid)[0].reference
     assert f'value="{ref}"' in client.get(f"/off-process?link={ref}").text
+
+
+def test_family_pages(share, tmp_path, family_registry):
+    from tests.conftest import make_services
+    alice = make_services(share, tmp_path / "fa.sqlite", family_registry, "alice")
+    bob = make_services(share, tmp_path / "fb.sqlite", family_registry, "bob")
+    rid = alice.create_request("demo_client@1", "Acme")
+    alice.submit(rid, {"capture": {"client": "Acme", "accounts": [{"account": "ACC1", "access": "trade"}]}})
+    page = client_for(alice).get(f"/requests/{rid}").text
+    assert "Went on to <strong>Standard checks</strong>" in page and "pill-skipped" in page
+    alice.set_checklist_item(rid, "normal", 0, True)
+    alice.complete_step(rid, "normal")
+    page = client_for(alice).get(f"/requests/{rid}").text
+    assert ">Approve<" in page and "can&#39;t approve it" in page or "can't approve it" in page
+    bob.sync()
+    bob_client = client_for(bob)
+    assert bob_client.post(f"/requests/{rid}/steps/signoff/approve", data={"notes": "ok"},
+                           follow_redirects=False).status_code == 303
+    page = bob_client.get(f"/requests/{rid}").text
+    assert "Approved by <strong>bob</strong>" in page and "Set up accounts" in page and "ACT-" in page
+    [child] = bob.children(rid)
+    child_page = bob_client.get(f"/requests/{child.request_id}").text
+    assert "Sub-request of" in child_page and f"/requests/{rid}#step-accounts" in child_page

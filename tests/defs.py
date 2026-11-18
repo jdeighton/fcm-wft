@@ -122,3 +122,39 @@ TT_FLOW = {
 }
 TT_FILES = {"schemas/tt_capture.schema.json": TT_CAPTURE,
             "samples/tt_limits.yaml": {"capture": {"account": "ACC1", "limits": {"max": 1000}}}}
+
+
+CHILD_SCHEMA = {"type": "object", "required": ["account", "access"], "properties": {
+    "account": {"type": "string"}, "access": {"type": "string", "enum": ["trade", "view"]}}}
+CHILD = {
+    "id": "demo_account", "version": 1, "title": "Demo: set up account", "reference_prefix": "ACT",
+    "inputs_schema": "child.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "child.schema.json"},
+        {"id": "setup", "type": "manual", "title": "Set up account", "depends_on": ["capture"], "checklist": ["Done"]},
+    ],
+}
+PARENT_SCHEMA = {"type": "object", "required": ["client"], "properties": {
+    "client": {"type": "string"}, "urgent": {"type": "boolean"},
+    "accounts": {"type": "array", "items": {"type": "object", "properties": CHILD_SCHEMA["properties"]}}}}
+PARENT = {
+    "id": "demo_client", "version": 1, "title": "Demo: onboard client", "reference_prefix": "CLI",
+    "inputs_schema": "parent.schema.json",
+    "steps": [
+        {"id": "capture", "type": "form", "schema": "parent.schema.json"},
+        {"id": "route", "type": "decision", "title": "Urgent?", "depends_on": ["capture"],
+         "branches": [{"when": "{{ inputs.urgent == true }}", "next": "fast"}], "default": "normal"},
+        {"id": "fast", "type": "manual", "title": "Fast-track checks", "depends_on": ["route"], "checklist": ["Phone risk"]},
+        {"id": "normal", "type": "manual", "title": "Standard checks", "depends_on": ["route"], "checklist": ["Email risk"]},
+        {"id": "signoff", "type": "approval", "title": "Head of ops sign-off", "depends_on": ["fast", "normal"]},
+        {"id": "accounts", "type": "subworkflow", "title": "Set up accounts", "depends_on": ["signoff"],
+         "workflow": "demo_account", "for_each": "{{ inputs.accounts }}",
+         "map_inputs": {"account": "{{ item.account }}", "access": "{{ item.access }}"}},
+        {"id": "welcome", "type": "manual", "title": "Send welcome pack", "depends_on": ["accounts"], "checklist": ["Sent"]},
+    ],
+}
+FAMILY_FILES = {
+    "schemas/child.schema.json": CHILD_SCHEMA, "schemas/parent.schema.json": PARENT_SCHEMA,
+    "samples/demo_account.yaml": {"capture": {"account": "A1", "access": "trade"}},
+    "samples/demo_client.yaml": {"capture": {"client": "Acme", "accounts": [{"account": "A1", "access": "trade"}]}},
+}

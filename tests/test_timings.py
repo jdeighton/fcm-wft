@@ -105,7 +105,8 @@ def test_skipped_counts_as_finished_for_dependencies(two_step):
     # Simulate a step being skipped (decision steps will do this): b becomes ready, request not complete.
     a = engine._to(r.state.step("a"), engine.SKIPPED, r.events[-1])
     r.state = engine._advance(engine._replace_step(r.state, a), defn, r.events[-1])
-    assert r.state.step("b").status == engine.READY and r.state.status == engine.ACTIVE
+    # b depends only on a skipped step, so it's skipped too (a branch not taken) and the request completes.
+    assert r.state.step("b").status == engine.SKIPPED and r.state.status == engine.COMPLETED
     assert timings.step_timing(r.state.step("a")).finished_at == at("08:00")
 
 

@@ -214,6 +214,26 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         att, path = services.off_process_attachment_file(record_id, sha256)
         return FileResponse(path, filename=att.name, media_type="application/octet-stream")
 
+    @app.post("/requests/{request_id}/steps/{step_id}/subworkflow/start")
+    def start_children(request_id: str, step_id: str):
+        services.follow_up(request_id)  # starts any sub-requests that should have been started
+        return RedirectResponse(f"/requests/{request_id}#step-{step_id}", status_code=303)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/decision")
+    def decide(request_id: str, step_id: str, chosen: Annotated[str, Form()] = ""):
+        services.choose_branch(request_id, step_id, chosen)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/approve")
+    def approve(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
+        services.approve(request_id, step_id, notes)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/reject")
+    def reject(request_id: str, step_id: str, notes: Annotated[str, Form()] = ""):
+        services.reject_approval(request_id, step_id, notes)
+        return back_to(request_id)
+
     @app.post("/picklists/refresh")
     def refresh_picklists(request: Request):
         names = [f"{system}.{op}" for system, a in services.adapters.items() for op in sorted(a.list_operations)]
@@ -288,9 +308,12 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         verify = {sd.id: _verify_view(state, defn, sd.id) for sd in defn.steps if sd.type == "verify"}
         follow_ups = services.follow_ups(request_id)
         linked_off_process = services.off_process_for_request(request_id)
+        parent = services.rm.get(state.parent["request"]) if state.parent else None
+        children = {c.request_id: c for c in services.children(request_id)}
         original = services.rm.get(state.follow_up_of) if state.follow_up_of else None
         return render(request, "request.html", status_code, req=state, defn=defn, forms=forms, people=services.people(),
                       verify=verify, message=message, linked_off_process=linked_off_process,
+                      parent=parent, children=children,
                       follow_ups=follow_ups, original=original,
                       editable=editable_forms(state, defn), form_errors=errors,
                       history=services.rm.history(request_id))
