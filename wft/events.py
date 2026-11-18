@@ -32,6 +32,7 @@ class Event:
     definition: str  # "<workflow_id>@<version>"
     ts: str  # UTC ISO-8601
     payload: dict[str, Any] = field(default_factory=dict)
+    prev: str | None = None  # event_id this event was decided on top of; None for the first event
     schema_version: int = EVENT_SCHEMA_VERSION
 
     def to_line(self) -> str:

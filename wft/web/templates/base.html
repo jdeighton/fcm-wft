@@ -6,12 +6,33 @@
   <title>{% if env != "prod" %}[{{ env | upper }}] {% endif %}{% block title %}WFT{% endblock %} · WFT</title>
   <link rel="stylesheet" href="/static/wft.css">
 </head>
-<body class="env-{{ env }}">
+<body class="env-{{ env }}{% if status.read_only %} read-only{% endif %}"
+      data-version="{{ status.version }}" data-read-only="{{ 'true' if status.read_only else 'false' }}"
+      data-conflicts="{{ conflicts | length }}" data-autorefresh="{% block autorefresh %}true{% endblock %}">
   {% if env != "prod" %}<div class="env-banner">{{ env | upper }} environment: not production</div>{% endif %}
   <header>
     <a href="/" class="brand">WFT</a>
     <span class="who">{{ user }}</span>
   </header>
+  {% if status.read_only %}
+  <div class="notice notice-warn" role="alert">
+    <strong>Read-only:</strong> the shared drive can't be reached (since {{ status.since[:19] | replace("T", " ") }} UTC).
+    You're seeing the last known state and changes are blocked. WFT will reconnect automatically;
+    use the manual process meanwhile.
+  </div>
+  {% endif %}
+  {% for c in conflicts %}
+  <div class="notice notice-conflict" role="alert">
+    <form method="post" action="/conflicts/{{ c.event_id }}/dismiss">
+      Your action <strong>{{ c.what }}</strong> on <a href="/requests/{{ c.request_id }}">{{ c.title }}</a>
+      ({{ c.ts[:19] | replace("T", " ") }} UTC) was overridden by someone else's change made at the same time.
+      Check the request and redo it if still needed.
+      <button type="submit">Dismiss</button>
+    </form>
+  </div>
+  {% endfor %}
+  <div id="updates" class="notice" hidden>Other changes have arrived. <a href="">Reload</a> when you're ready.</div>
   <main>{% block content %}{% endblock %}</main>
+  <script src="/static/wft.js"></script>
 </body>
 </html>

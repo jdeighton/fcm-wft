@@ -81,3 +81,54 @@ def test_state_changes_need_same_origin(services):
                              follow_redirects=False)
     assert by_referer.status_code == 303
     assert len(services.rm.list_requests()) == 1
+
+
+def test_status_endpoint_tracks_changes(services):
+    client = client_for(services)
+    before = client.get("/status").json()
+    assert before == {"version": 0, "read_only": False, "conflicts": 0}
+    services.create_request(DEMO, "x")
+    assert client.get("/status").json()["version"] == 1
+
+
+def test_rebuild_cache_button(services):
+    client = client_for(services)
+    services.create_request(DEMO, "Kept")
+    assert "Rebuild cache" in client.get("/").text
+    r = client.post("/cache/rebuild", follow_redirects=False)
+    assert r.status_code == 303
+    assert [r.title for r in services.rm.list_requests()] == ["Kept"]
+
+
+def test_read_only_banner_and_blocked_writes(services, share):
+    client = client_for(services)
+    hidden = share.with_name("offline")
+    share.rename(hidden)
+    try:
+        services.sync()
+        page = client.get("/")
+        assert "Read-only" in page.text and 'class="env-uat read-only"' in page.text
+        r = client.post("/requests", data={"workflow": DEMO, "title": "x"})
+        assert r.status_code == 503 and "unavailable" in r.text
+    finally:
+        hidden.rename(share)
+    services.sync()
+    assert "Read-only" not in client.get("/").text
+
+
+def test_conflict_banner_and_dismiss(services, share, tmp_path, registry):
+    from tests.conftest import make_services
+    services._acknowledged_path = tmp_path / "ack.json"
+    bob = make_services(share, tmp_path / "bob.sqlite", registry, "bob")
+    rid = services.create_request(DEMO, "Contested")
+    bob.sync()
+    bob.set_checklist_item(rid, "do_the_thing", 0, True)
+    services.set_checklist_item(rid, "do_the_thing", 1, True)  # alice hadn't seen bob's tick
+    services.sync()
+    client = client_for(services)
+    page = client.get("/").text
+    assert "was overridden" in page and "ticking item 2" in page and "Contested" in page
+    [c] = services.my_conflicts()
+    r = client.post(f"/conflicts/{c.event_id}/dismiss", headers={"Referer": f"{ORIGIN}/"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert "was overridden" not in client.get("/").text

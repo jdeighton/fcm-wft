@@ -309,9 +309,9 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 
 **Rules**
 - **NFR-3.1 Single writer per file.** Each user's instance appends only to its own monthly journal. An instance lock (`O_CREAT|O_EXCL` lock file with host, PID, start time; stale after a timeout with heartbeat) prevents the same user running two instances.
-- **NFR-3.2 Events are JSON lines**, each with: event ID, request ID, per-request sequence number (expected parent), event type, actor, host, app version, definition version, UTC timestamp, payload, schema version.
+- **NFR-3.2 Events are JSON lines**, each with: event ID, request ID, per-request sequence number, the id of the event it was decided on top of (`prev`), event type, actor, host, app version, definition version, UTC timestamp, payload, schema version.
 - **NFR-3.3 Readers poll** all journal files (size/mtime check) every 5–15 s and read only new bytes; a trailing partial line is ignored until complete. File-system watch notifications are not relied on.
-- **NFR-3.4 State is derived by replay**, ordered per request by sequence number, not wall-clock time. Conflicting events (same parent sequence) are resolved deterministically (earliest UTC timestamp, then event ID); the losing action is surfaced to its author as a conflict to retry.
+- **NFR-3.4 State is derived by replay**, ordered per request by sequence number, not wall-clock time. Conflicting events (same parent sequence) are resolved deterministically (earliest UTC timestamp, then event ID); the losing action, and any later action built on it, is surfaced to its author as a conflict to retry. Dismissed conflicts are remembered in the user's profile so a cache rebuild doesn't resurface them.
 - **NFR-3.5 Locks** are used only for readable-ID allocation and instance exclusivity. Lock files contain owner metadata and expire.
 - **NFR-3.6 Share unavailable** → instance switches to **read-only mode** with a prominent banner, serving the last cached state; writes are blocked (no offline queueing). Users fall back to the manual process.
 - **NFR-3.7** All storage access goes through a `Repository` interface so the backend can be swapped (e.g. for a database) later.
