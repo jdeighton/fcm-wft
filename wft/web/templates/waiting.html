@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Waiting on{% endblock %}
+{% block content %}
+<h1>Waiting on</h1>
+{% for reason, label in wait_reasons.items() %}{% set items = board.get(reason, []) %}
+<section class="card">
+  <h2>{{ label }} <span class="muted small">({{ items | length }})</span></h2>
+  {% if items %}
+  <table>
+    <thead><tr><th>Reference</th><th>Request</th><th>Step</th><th>Note</th><th>Waiting since (UTC)</th><th>Waited</th><th>Owner</th><th></th></tr></thead>
+    <tbody>
+    {% for w in items %}
+    <tr>
+      <td>{{ w.request.reference or "pending" }}</td>
+      <td><a href="/requests/{{ w.request.request_id }}">{{ w.request.title }}</a></td>
+      <td>{{ w.step_title }}</td>
+      <td>{{ w.note or "" }}</td>
+      <td>{{ w.since | utc }}<br><span class="muted small">by {{ w.by | person }}</span></td>
+      <td><strong>{{ w.waited | duration }}</strong></td>
+      <td>{{ w.request.owner | person }}</td>
+      <td><form method="post" action="/requests/{{ w.request.request_id }}/steps/{{ w.step_id }}/resume"><button type="submit" class="secondary">Resume</button></form></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing waiting on {{ label | lower }}.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}

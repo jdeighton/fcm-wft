@@ -38,7 +38,8 @@ def test_create_tick_and_complete_through_ui(services):
     detail = client.post(f"/requests/{rid}/steps/do_the_thing/complete")
     assert detail.status_code == 200 and "Completed" in detail.text
 
-    listing = client.get("/").text
+    assert "Add user jdoe" not in client.get("/").text  # the default view is open requests
+    listing = client.get("/?status=completed").text
     assert "Add user jdoe" in listing and "status-completed" in listing
 
 
@@ -224,3 +225,39 @@ def test_request_page_owner_and_assignment_controls(services):
     page = client.get(f"/requests/{rid}").text
     assert "With <strong>bob</strong>" in page and "Owner: <strong>bob</strong>" in page
     assert "<td>bob</td>" in client.get("/").text
+
+
+def test_wait_resume_and_waiting_board_pages(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "Needs a form")
+    services.submit(rid, {})
+    page = client.get(f"/requests/{rid}").text
+    assert ">Start<" in page and "Mark as waiting" in page and "pill-ready" in page
+    client.post(f"/requests/{rid}/steps/do_the_thing/start")
+    assert "pill-in_progress" in client.get(f"/requests/{rid}").text
+    client.post(f"/requests/{rid}/steps/do_the_thing/wait", data={"reason": "client", "note": "signed form"})
+    page = client.get(f"/requests/{rid}").text
+    assert "Waiting on <strong>Client</strong>: signed form" in page and ">Resume<" in page
+    assert "/checklist/0" not in page  # no ticking while waiting
+    assert "waiting on client" in page  # timings line
+    board = client.get("/waiting").text
+    assert "Needs a form" in board and "signed form" in board and "Nothing waiting on krm22" in board
+    r = client.post(f"/requests/{rid}/steps/do_the_thing/resume", headers={"Referer": f"{ORIGIN}/waiting"},
+                    follow_redirects=False)
+    assert r.headers["location"] == "/waiting"
+    assert "Needs a form" not in client.get("/waiting").text
+    assert client.post(f"/requests/{rid}/steps/do_the_thing/wait", data={"reason": "other"}).status_code == 409
+
+
+def test_request_list_filters_and_sort_links(services):
+    client = client_for(services)
+    for title in ("Zulu", "Alpha"):
+        rid = services.create_request(DEMO, title)
+        services.submit(rid, {})
+    page = client.get("/?status=active&sort=title&dir=asc").text
+    assert page.index("Alpha") < page.index("Zulu")
+    assert 'aria-sort="ascending"' in page and "sort=title&amp;dir=desc" in page
+    page = client.get("/?status=active&sort=title&dir=desc").text
+    assert page.index("Zulu") < page.index("Alpha")
+    assert "No requests match" in client.get("/?q=nothing-like-this").text
+    assert ">Age" in page and "In step" in page and "pill-ready" in page

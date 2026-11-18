@@ -10,10 +10,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from wft import __version__, engine
+from wft import __version__, engine, timings
 from wft.engine import CommandError
 from wft.events import Event
-from wft.services import NotFound, ReadOnly, Services
+from wft.services import STATUS_FILTERS, NotFound, ReadOnly, Services
 from wft.web import security
 from wft.web.forms import build_fields, parse_form
 
@@ -27,6 +27,9 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals.update(env=env, user=services.user)
     templates.env.filters["person"] = lambda u: services.team.name(u) if u else "—"
+    templates.env.filters["duration"] = timings.format_duration
+    templates.env.filters["utc"] = lambda ts: (ts or "")[:16].replace("T", " ")
+    templates.env.globals.update(wait_reasons=engine.WAIT_REASONS, step_timing=timings.step_timing)
 
     def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
         ctx.update(status=services.status(), conflicts=[_describe(services, e) for e in services.my_conflicts()],
@@ -89,9 +92,32 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
         return back_to(request_id)
 
     @app.get("/")
-    def index(request: Request):
+    def index(request: Request, status: str = "open", workflow: str = "", owner: str = "", q: str = "",
+              sort: str = "age", dir: str = "desc"):
         workflows = [(w, w.runnable_by(__version__)) for w in services.registry.latest()]
-        return render(request, "index.html", requests=services.rm.list_requests(), workflows=workflows)
+        rows = services.open_requests(status, workflow, owner, q, sort, dir != "asc")
+        filters = {"status": status, "workflow": workflow, "owner": owner, "q": q, "sort": sort, "dir": dir}
+        return render(request, "index.html", rows=rows, workflows=workflows, filters=filters,
+                      people=services.people(), status_filters=list(STATUS_FILTERS))
+
+    @app.get("/waiting")
+    def waiting(request: Request):
+        return render(request, "waiting.html", board=services.waiting_board())
+
+    @app.post("/requests/{request_id}/steps/{step_id}/start")
+    def start(request_id: str, step_id: str):
+        services.start_step(request_id, step_id)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/wait")
+    def wait(request_id: str, step_id: str, reason: Annotated[str, Form()], note: Annotated[str, Form()] = ""):
+        services.wait_step(request_id, step_id, reason, note)
+        return back_to(request_id)
+
+    @app.post("/requests/{request_id}/steps/{step_id}/resume")
+    def resume(request: Request, request_id: str, step_id: str):
+        services.resume_step(request_id, step_id)
+        return RedirectResponse(_back(request, f"/requests/{request_id}"), status_code=303)
 
     @app.post("/requests")
     def create(workflow: Annotated[str, Form()], title: Annotated[str, Form()]):
@@ -171,7 +197,7 @@ def create_app(services: Services, env: str, token: str, port: int) -> FastAPI:
 def _back(request: Request, default: str) -> str:
     """Return to the page the action came from (e.g. My tasks after a claim); only this app's own pages."""
     path = urlsplit(request.headers.get("referer") or "").path
-    return path if path == "/" or path == "/tasks" or path.startswith("/requests/") else default
+    return path if path in ("/", "/tasks", "/waiting") or path.startswith("/requests/") else default
 
 
 def editable_forms(state, defn) -> list:
@@ -179,7 +205,7 @@ def editable_forms(state, defn) -> list:
     if state.status == engine.DRAFT:
         return engine.initial_forms(defn)
     if state.status == engine.ACTIVE:
-        return [defn.step(s.id) for s in state.steps if s.status == engine.READY and defn.step(s.id).type == "form"]
+        return [defn.step(s.id) for s in state.steps if s.status in engine.WORKABLE and defn.step(s.id).type == "form"]
     return []
 
 
