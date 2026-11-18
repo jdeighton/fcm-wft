@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}WFT{% endblock %} · WFT</title>
+  <title>{% if env != "prod" %}[{{ env | upper }}] {% endif %}{% block title %}WFT{% endblock %} · WFT</title>
   <link rel="stylesheet" href="/static/wft.css">
 </head>
 <body class="env-{{ env }}">

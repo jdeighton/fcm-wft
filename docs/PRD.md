@@ -304,6 +304,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
   locks\                           # short-lived lock files (ID allocation)
   instance-locks\<username>.lock   # one running instance per user
   meta\min_app_version
+  meta\environment                # "prod" or "uat"; must match the running env
 ```
 
 **Rules**
@@ -330,7 +331,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 - Startup: `wft.bat [--env prod|uat]` (default `prod`).
 - Loads `%USERPROFILE%\.wft\<env>.env` containing: share root, TT API base URL, TT API key/secret, preferred port, (later) KRM22 settings.
 - `.env.example` committed to the repo listing all keys.
-- **Safety check:** the app refuses to start if the env file mixes environments (e.g. UAT profile pointing at a prod share or prod TT URL). Expected share/URL patterns per environment are defined in repo config.
+- **Safety check:** the app refuses to start if the env file mixes environments (e.g. UAT profile pointing at a prod share or prod TT URL). Expected share/URL patterns per environment are defined in repo config (`config/environments.yaml`), and the share must contain `meta\environment` naming its environment. Unknown env-file keys are rejected.
 - UAT shows a persistent, highly visible banner and distinct colour scheme.
 
 ### 7.6 Deployment & updates

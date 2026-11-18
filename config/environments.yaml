@@ -1,0 +1,14 @@
+# Guards against an env file pointing at the wrong environment
+# (e.g. uat.env with a production share or production TT URL).
+#
+# For each environment, list env-file keys and regex patterns (case-insensitive).
+# A value must match at least one pattern for its own environment and must not
+# match any pattern for another environment. Keys absent from an env file are
+# not checked. Replace the placeholders with the firm's real share paths and
+# URLs before go-live.
+prod:
+  WFT_SHARE_ROOT:
+    - '[\\/]prod([\\/]|$)'
+uat:
+  WFT_SHARE_ROOT:
+    - '[\\/]uat([\\/]|$)'
