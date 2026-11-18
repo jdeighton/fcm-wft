@@ -42,7 +42,8 @@ def main(argv: list[str] | None = None) -> int:
 
     user, host = default_identity()
     try:
-        result = publish(args.definitions, config.share_root, f"{user}@{host}", commit=commit, dirty=dirty)
+        result = publish(args.definitions, config.share_root, f"{user}@{host}", username=user,
+                         commit=commit, dirty=dirty)
     except PublishError as e:
         if e.report:
             for issue in e.report.issues:

@@ -19,5 +19,6 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 - Python ≥ 3.11. Create a venv and install `requirements-dev.txt` (from Artifactory on firm machines).
 - Run tests: `python -m pytest`
 - Run locally: put a `uat.env` (see `.env.example`) in `%USERPROFILE%\.wft\` (or the folder named by `WFT_HOME`), create `meta/environment` containing `uat` in the share folder (the path must match `config/environments.yaml`), publish definitions with `python scripts/publish_definitions.py --env uat`, then `python -m wft --env uat` and open the printed link. To try unpublished definitions, set `WFT_DEFINITIONS_DIR` in the env file to the repo's `definitions` folder.
+- Team and roles: `definitions/config/roles.yaml` (published with the definitions). Only published admins can publish.
 - Validate definitions: `python scripts/validate.py` (add `--env uat` to also check versions were bumped against the share). The definition format is `wft/schemas/workflow.schema.json`; expressions are in `wft/expressions.py`.
 - The engine (`wft/engine.py`) must stay pure: no I/O, clocks or id generation. Storage goes through the `Repository` interface.

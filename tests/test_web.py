@@ -190,3 +190,37 @@ def test_ready_form_step_and_notes(share, tmp_path, forms_registry):
     assert r.status_code == 303
     page = client.get(f"/requests/{rid}").text
     assert "Done &amp; dusted &lt;b&gt;" in page and "note added" in page
+
+
+def test_tasks_page_and_claim_returns_there(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "Needs doing")
+    services.submit(rid, {})
+    page = client.get("/tasks").text
+    assert "Unclaimed on my requests" in page and "Needs doing" in page
+    r = client.post(f"/requests/{rid}/steps/do_the_thing/claim", headers={"Referer": f"{ORIGIN}/tasks"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/tasks"
+    page = client.get("/tasks").text
+    assert 'class="badge">1<' in page  # nav count of steps with me
+    services.release_step(rid, "do_the_thing")
+    r = client.post(f"/requests/{rid}/steps/do_the_thing/claim", headers={"Referer": "https://evil.example/tasks"},
+                    follow_redirects=False)
+    assert r.headers["location"] == "/tasks"  # only ever a path on this app, never another site
+    services.release_step(rid, "do_the_thing")
+    r = client.post(f"/requests/{rid}/steps/do_the_thing/claim", headers={"Referer": "https://evil.example/x"},
+                    follow_redirects=False)
+    assert r.headers["location"] == f"/requests/{rid}"
+
+
+def test_request_page_owner_and_assignment_controls(services):
+    client = client_for(services)
+    rid = services.create_request(DEMO, "x")
+    services.submit(rid, {})
+    page = client.get(f"/requests/{rid}").text
+    assert "Owner: <strong>alice</strong>" in page and "Unclaimed" in page and ">Claim<" in page
+    client.post(f"/requests/{rid}/steps/do_the_thing/assign", data={"user": "bob"})
+    client.post(f"/requests/{rid}/owner", data={"owner": "bob"})
+    page = client.get(f"/requests/{rid}").text
+    assert "With <strong>bob</strong>" in page and "Owner: <strong>bob</strong>" in page
+    assert "<td>bob</td>" in client.get("/").text

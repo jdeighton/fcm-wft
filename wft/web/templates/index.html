@@ -24,7 +24,7 @@
   <h2>Requests</h2>
   {% if requests %}
   <table>
-    <thead><tr><th>Reference</th><th>Title</th><th>Workflow</th><th>Status</th><th>Current step</th><th>Created by</th><th>Created (UTC)</th></tr></thead>
+    <thead><tr><th>Reference</th><th>Title</th><th>Workflow</th><th>Status</th><th>Current step</th><th>Owner</th><th>Created (UTC)</th></tr></thead>
     <tbody>
     {% for r in requests %}
       <tr>
@@ -33,7 +33,7 @@
         <td>{{ r.workflow }}</td>
         <td><span class="status status-{{ r.status | lower }}">{{ r.status }}</span></td>
         <td>{{ r.current_step or "—" }}</td>
-        <td>{{ r.created_by }}</td>
+        <td>{{ r.owner | person }}</td>
         <td>{{ r.created_at[:16] | replace("T", " ") }}</td>
       </tr>
     {% endfor %}

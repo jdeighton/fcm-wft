@@ -47,7 +47,7 @@ WFT is a **helper tool, not a system of record**. Trading systems (e.g. TT) and 
 | **Operator** | All users | Create, amend, hold, resume, cancel requests; claim and complete steps; mark steps *completed outside tool* (notes required); raise and resolve impact flags (including *not required*, notes required); create off-process records; export. |
 | **Admin** | 1–2 maintainers | Everything an Operator can do, plus: publish workflow definitions, edit configuration (picklists, off-process reasons), add ad-hoc steps to an individual request. |
 
-Identity is the Windows username of the person running the instance. Roles are a guardrail within a trusted team, not a security boundary; access to the shared drive (NTFS permissions) is the real control. Every action is recorded with the actor, so accountability comes from the audit trail.
+Identity is the Windows username of the person running the instance. Users, display names and the admin role are listed in `definitions/config/roles.yaml`, published to the share with the definitions; only published admins may publish (until an environment has any admins, anyone may, to bootstrap). Roles are a guardrail within a trusted team, not a security boundary; access to the shared drive (NTFS permissions) is the real control. Every action is recorded with the actor, so accountability comes from the audit trail.
 
 ## 4. Release 1 scope
 
@@ -306,6 +306,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
   instance-locks\<username>.lock   # one running instance per user
   meta\min_app_version
   meta\environment                # "prod" or "uat"; must match the running env
+  definitions\config\roles.yaml    # team: usernames, display names, admin role
 ```
 
 **Rules**
@@ -314,7 +315,7 @@ Each user runs a local Python backend that serves the web UI on localhost. All s
 - **NFR-3.3 Readers poll** all journal files (size/mtime check) every 5–15 s and read only new bytes; a trailing partial line is ignored until complete. File-system watch notifications are not relied on.
 - **NFR-3.4 State is derived by replay**, ordered per request by sequence number, not wall-clock time. Conflicting events (same parent sequence) are resolved deterministically (earliest UTC timestamp, then event ID); the losing action, and any later action built on it, is surfaced to its author as a conflict to retry. Dismissed conflicts are remembered in the user's profile so a cache rebuild doesn't resurface them.
 - **NFR-3.5 Locks** are used only for readable-reference allocation and instance exclusivity. Lock files contain owner metadata and expire.
-- **NFR-3.5a Annotations:** readable references and notes are recorded outside the per-request sequence, so they never conflict with other users' actions.
+- **NFR-3.5a Annotations:** readable references, notes, owner changes and step claims/assignments are recorded outside the per-request sequence, so they never conflict with other users' actions. Owner changes and assignments: the latest wins. Claims are exclusive: of two simultaneous claims the earliest wins and the other claimant sees a conflict.
 - **NFR-3.6 Share unavailable** → instance switches to **read-only mode** with a prominent banner, serving the last cached state; writes are blocked (no offline queueing). Users fall back to the manual process.
 - **NFR-3.7** All storage access goes through a `Repository` interface so the backend can be swapped (e.g. for a database) later.
 - **NFR-3.8 Retention:** all data kept indefinitely; journals older than 12 months moved to `archive\YYYY\` by an admin script and still read for history.

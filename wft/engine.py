@@ -25,7 +25,9 @@ CHECKLIST_ITEM_SET = "checklist_item_set"
 STEP_COMPLETED = "step_completed"
 REFERENCE_ASSIGNED = "reference_assigned"
 NOTE_ADDED = "note_added"
-ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED})
+OWNER_CHANGED = "owner_changed"
+STEP_ASSIGNMENT = "step_assignment"  # payload: step, mode (claim | assign | release), assignee
+ANNOTATIONS = frozenset({REFERENCE_ASSIGNED, NOTE_ADDED, OWNER_CHANGED, STEP_ASSIGNMENT})
 ANNOTATION_SEQ = 0
 
 # Step types this version of the engine can run. Definitions using others fail validation.
@@ -73,6 +75,7 @@ class StepState:
     completed_at: str | None = None
     data: dict | None = None    # submitted form data
     draft: dict | None = None   # form data saved but not yet submitted
+    assignee: str | None = None  # who has claimed or been assigned the step
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ class RequestState:
     submitted_at: str | None = None
     reference: str | None = None
     notes: tuple[Note, ...] = ()
+    owner: str = ""  # accountable person; the creator unless reassigned
 
     def step(self, step_id: str) -> StepState:
         for s in self.steps:
@@ -228,6 +232,43 @@ def assign_reference(state: RequestState, reference: str) -> NewEvent:
     return NewEvent(REFERENCE_ASSIGNED, seq=ANNOTATION_SEQ, payload={"reference": reference})
 
 
+def change_owner(state: RequestState, new_owner: str) -> NewEvent:
+    new_owner = new_owner.strip().lower()
+    if not new_owner:
+        raise CommandError("Choose who should own the request")
+    if new_owner == state.owner:
+        raise CommandError(f"{new_owner} already owns this request")
+    return NewEvent(OWNER_CHANGED, seq=ANNOTATION_SEQ, payload={"owner": new_owner, "previous": state.owner})
+
+
+def claim_step(state: RequestState, defn: WorkflowDef, step_id: str, me: str) -> NewEvent:
+    step = _ready_step(state, defn, step_id)
+    if step.assignee == me:
+        raise CommandError("You already have this step")
+    if step.assignee:
+        raise CommandError(f"{step.assignee} has this step; ask them to release it, or assign it to yourself")
+    return NewEvent(STEP_ASSIGNMENT, seq=ANNOTATION_SEQ, payload={"step": step_id, "mode": "claim", "assignee": me})
+
+
+def assign_step(state: RequestState, defn: WorkflowDef, step_id: str, user: str) -> NewEvent:
+    step = _ready_step(state, defn, step_id)
+    user = user.strip().lower()
+    if not user:
+        raise CommandError("Choose who to assign the step to")
+    if step.assignee == user:
+        raise CommandError(f"{user} already has this step")
+    return NewEvent(STEP_ASSIGNMENT, seq=ANNOTATION_SEQ,
+                    payload={"step": step_id, "mode": "assign", "assignee": user, "previous": step.assignee})
+
+
+def release_step(state: RequestState, defn: WorkflowDef, step_id: str) -> NewEvent:
+    step = _ready_step(state, defn, step_id)
+    if not step.assignee:
+        raise CommandError("Nobody has this step")
+    return NewEvent(STEP_ASSIGNMENT, seq=ANNOTATION_SEQ,
+                    payload={"step": step_id, "mode": "release", "assignee": None, "previous": step.assignee})
+
+
 def add_note(state: RequestState, text: str) -> NewEvent:
     text = text.strip()
     if not text:
@@ -305,7 +346,7 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         return RequestState(
             request_id=event.request_id, workflow=defn.key, title=event.payload["title"],
             status=DRAFT, created_by=event.actor, created_at=event.ts, updated_at=event.ts,
-            seq=event.seq, last_event=event.event_id,
+            seq=event.seq, last_event=event.event_id, owner=event.actor,
             steps=tuple(StepState(s.id, PENDING) for s in defn.steps),
         )
 
@@ -313,7 +354,7 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
         raise ValueError(f"{event.request_id}: {event.type} before {REQUEST_CREATED}")
 
     if event.type in ANNOTATIONS:
-        return _annotate(state, event)
+        return _annotate(state, event)[0]
 
     state = replace(state, seq=event.seq, last_event=event.event_id, updated_at=event.ts)
 
@@ -346,12 +387,25 @@ def apply(state: RequestState | None, event: Event, defn: WorkflowDef) -> Reques
     raise ValueError(f"Unknown event type {event.type!r}")
 
 
-def _annotate(state: RequestState, event: Event) -> RequestState:
+def _annotate(state: RequestState, event: Event) -> tuple[RequestState, bool]:
+    """Apply an annotation (in time order). Returns the new state and whether it took effect."""
     if event.type == REFERENCE_ASSIGNED:
         # The earliest assignment wins if a retry ever produced two.
-        return state if state.reference else replace(state, reference=event.payload["reference"])
+        if state.reference:
+            return state, False
+        return replace(state, reference=event.payload["reference"]), True
     if event.type == NOTE_ADDED:
-        return replace(state, notes=state.notes + (Note(event.ts, event.actor, event.payload["text"]),))
+        return replace(state, notes=state.notes + (Note(event.ts, event.actor, event.payload["text"]),)), True
+    if event.type == OWNER_CHANGED:
+        return replace(state, owner=event.payload["owner"]), True  # the latest change wins
+    if event.type == STEP_ASSIGNMENT:
+        try:
+            step = state.step(event.payload["step"])
+        except KeyError:
+            return state, False
+        if event.payload["mode"] == "claim" and step.assignee not in (None, event.actor):
+            return state, False  # someone else claimed it first: claims are exclusive
+        return _replace_step(state, replace(step, assignee=event.payload["assignee"])), True
     raise ValueError(f"Unknown annotation {event.type!r}")
 
 
@@ -430,5 +484,7 @@ def replay(events: Iterable[Event], defn: WorkflowDef) -> Replay:
     if state is None:
         raise ValueError("No events to replay")
     for e in annotations(events):
-        state = apply(state, e, defn)
+        state, effective = _annotate(state, e)
+        if not effective and e.type == STEP_ASSIGNMENT:
+            losers.append(e)  # a claim that lost to an earlier one is reported like any other conflict
     return Replay(state, tuple(losers))

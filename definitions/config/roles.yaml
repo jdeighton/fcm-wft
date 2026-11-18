@@ -1,0 +1,16 @@
+# Who's on the team. Published to the share by scripts/publish_definitions.py.
+#
+# MUST be populated before production use. See README.md.
+#
+# Everyone who runs WFT is an Operator. Add `roles: [admin]` for the 1-2 people who
+# publish definitions and change configuration. Usernames are Windows usernames
+# (case doesn't matter); `name` is what the UI shows.
+#
+# Until a roles file with at least one admin has been published to an environment,
+# anyone may publish there (so the first admin can bootstrap it).
+users: []
+#  - username: jsmith
+#    name: Jane Smith
+#    roles: [admin]
+#  - username: akhan
+#    name: Ali Khan

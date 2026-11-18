@@ -15,6 +15,14 @@
     {% if req.submitted_at %}· submitted by {{ req.submitted_by }} at {{ req.submitted_at[:16] | replace("T", " ") }} UTC{% endif %}
     {% if req.status != "Draft" and not req.reference %}· reference pending{% endif %}
   </p>
+  <form method="post" action="/requests/{{ req.request_id }}/owner" class="row inline-form">
+    <span>Owner: <strong>{{ req.owner | person }}</strong></span>
+    <label class="sr-only" for="owner-select">New owner</label>
+    <select id="owner-select" name="owner">
+      {% for u, name in people if u != req.owner %}<option value="{{ u }}">{{ name }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="secondary">Reassign</button>
+  </form>
 </section>
 
 {% if req.status == "Draft" %}
@@ -44,6 +52,24 @@
 {% if not (req.status == "Draft" and sd in editable) %}
 <section class="card step step-{{ s.status }}">
   <h2>{{ sd.title }} <span class="step-status">{{ s.status }}</span></h2>
+  {% if s.status == "ready" and req.status == "Active" %}
+  <div class="assignment row">
+    {% if s.assignee %}
+    <span>With <strong>{{ s.assignee | person }}</strong></span>
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/release"><button type="submit" class="secondary">Release</button></form>
+    {% else %}
+    <span class="muted">Unclaimed</span>
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/claim"><button type="submit">Claim</button></form>
+    {% endif %}
+    <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/assign" class="row inline-form">
+      <label class="sr-only" for="assign-{{ s.id }}">Assign to</label>
+      <select id="assign-{{ s.id }}" name="user">
+        {% for u, name in people if u != s.assignee %}<option value="{{ u }}">{{ name }}</option>{% endfor %}
+      </select>
+      <button type="submit" class="secondary">Assign</button>
+    </form>
+  </div>
+  {% endif %}
   {% if sd.type == "form" %}
     {% if s.status == "ready" and req.status == "Active" %}
     {% if form_errors.get(s.id) %}<p class="field-error" role="alert">Some fields need attention.</p>{% endif %}

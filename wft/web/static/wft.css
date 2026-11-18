@@ -59,3 +59,11 @@ dl.data dt { color:var(--muted); } dl.data dd { margin:0; }
 .note-form { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
 @media (max-width: 600px) { dl.data { grid-template-columns:1fr; } }
 .field > label { display:block; }
+header nav { display:flex; gap:16px; align-items:center; }
+header nav a:not(.brand) { color:var(--fg); text-decoration:none; }
+header nav a:not(.brand):hover { text-decoration:underline; }
+.badge { display:inline-block; min-width:1.4em; padding:0 6px; border-radius:999px; background:var(--accent); color:#fff; font-size:.75rem; text-align:center; }
+.assignment { margin-bottom:8px; }
+.assignment form { display:inline-flex; }
+.inline-form { gap:6px; align-items:center; }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }

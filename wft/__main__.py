@@ -16,6 +16,7 @@ from wft.readmodel import ReadModel
 from wft.repository import (FileRepository, InstanceLock, InstanceLockError, ReferenceAllocator,
                             default_identity)
 from wft.services import Services
+from wft.team import REPO_ROLES_FILE, ROLES_FILE, TeamSource
 from wft.web import security
 from wft.web.app import create_app
 
@@ -69,12 +70,14 @@ def main(argv: list[str] | None = None) -> int:
         if config.definitions_dir:
             print(f"WFT: using UNPUBLISHED definitions from {config.definitions_dir} (development only)")
             registry = DefinitionRegistry.from_repo(config.definitions_dir)
+            team = TeamSource(config.definitions_dir / REPO_ROLES_FILE)
         else:
             registry = DefinitionRegistry.from_share(config.share_root)
+            team = TeamSource(config.share_root / ROLES_FILE)
         read_model = ReadModel(config.cache_path, registry)
         services = Services(FileRepository(config.share_root, user), read_model, registry, user, host,
                             acknowledged_path=config.home / "acknowledged-conflicts.json",
-                            references=ReferenceAllocator(config.share_root))
+                            references=ReferenceAllocator(config.share_root), team=team)
         services.sync()
         services.start_polling()
         app = create_app(services, config.env, token, port)

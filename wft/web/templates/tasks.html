@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}My tasks{% endblock %}
+{% macro task_table(items, claim=False) %}
+<table>
+  <thead><tr><th>Reference</th><th>Request</th><th>Step</th><th>Owner</th><th>Waiting since (UTC)</th>{% if claim %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+  {% for t in items %}
+  <tr>
+    <td>{{ t.request.reference or "pending" }}</td>
+    <td><a href="/requests/{{ t.request.request_id }}">{{ t.request.title }}</a><br><span class="muted small">{{ t.workflow_title }}</span></td>
+    <td>{{ t.step_title }}</td>
+    <td>{{ t.request.owner | person }}</td>
+    <td>{{ t.request.updated_at[:16] | replace("T", " ") }}</td>
+    {% if claim %}<td><form method="post" action="/requests/{{ t.request.request_id }}/steps/{{ t.step_id }}/claim"><button type="submit">Claim</button></form></td>{% endif %}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+{% block content %}
+<section class="card">
+  <h2>With me <span class="muted small">({{ tasks.mine | length }})</span></h2>
+  {% if tasks.mine %}{{ task_table(tasks.mine) }}{% else %}<p class="muted">Nothing is with you right now.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Unclaimed on my requests <span class="muted small">({{ tasks.on_my_requests | length }})</span></h2>
+  {% if tasks.on_my_requests %}{{ task_table(tasks.on_my_requests, claim=True) }}{% else %}<p class="muted">Every ready step on your requests is with someone.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Available to claim <span class="muted small">({{ tasks.claimable | length }})</span></h2>
+  {% if tasks.claimable %}{{ task_table(tasks.claimable, claim=True) }}{% else %}<p class="muted">No unclaimed steps on other requests.</p>{% endif %}
+</section>
+
+{% if tasks.drafts %}
+<section class="card">
+  <h2>My drafts <span class="muted small">({{ tasks.drafts | length }})</span></h2>
+  <ul>
+  {% for r in tasks.drafts %}<li><a href="/requests/{{ r.request_id }}">{{ r.title }}</a> <span class="muted small">started {{ r.created_at[:16] | replace("T", " ") }} UTC</span></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+{# "My requests with open flags" is added with impact flags (#9). #}
+{% endblock %}
