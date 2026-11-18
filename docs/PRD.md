@@ -226,6 +226,8 @@ User-level limits are **not** part of this workflow in Release 1 (would require 
 - **FR-9.1** Users can create an **off-process record**: trading system, what was set up/changed, date performed, reason category, mandatory notes, optional attachments, optional link to a WFT request.
 - **FR-9.2** Reason categories (admin-configurable): *Urgent / out of hours*, *Unusual structure not supported*, *Tool missing workflow or step*, *Tool or share unavailable*, *Trading-system issue*, *Other (notes required)*.
 - **FR-9.3** Off-process records appear in search and exports. (Dashboard view by reason is a later release.)
+- **FR-9.4** Records are stored like requests (an event in the recorder's journal, so they are shared and survive cache rebuilds) but are not workflow requests. Each gets a readable reference `OFF-YYYY-NNNN`, can have further notes and attachments, and can link to a request by reference; the linked request's page lists it and offers "Log an off-process setup for this request".
+- **FR-9.5** Reason categories live in `definitions/config/off_process_reasons.yaml`, published with the definitions (admins). Without a published file the six seeded categories are used. Records keep the reason id, so ids must not be reused for a different meaning.
 
 ### 6.10 Dashboard & views
 

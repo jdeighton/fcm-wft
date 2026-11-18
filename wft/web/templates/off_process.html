@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Off-process records{% endblock %}
+{% block content %}
+<h1>Off-process records</h1>
+<p class="muted">Setups or changes done outside WFT (urgent, unusual, or when WFT couldn't be used). Logging them keeps the
+record complete and shows which workflows are missing.</p>
+
+<section class="card">
+  <h2>Log an off-process setup</h2>
+  <form method="post" action="/off-process" class="form">
+    <div class="row">
+      <label>Trading system <input name="system" list="systems" required value="TT">
+        <datalist id="systems">{% for s in systems %}<option value="{{ s }}">{% endfor %}</datalist></label>
+      <label>Date done <input name="performed_on" type="date" required value="{{ today }}" max="{{ today }}"></label>
+      <label>Reason
+        <select name="reason" required><option value="">Choose…</option>
+          {% for r in reasons %}<option value="{{ r.id }}">{{ r.label }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+    <label>What was set up or changed <input name="what" required maxlength="4000" placeholder="e.g. Raised ACC9 max position to 800 in TT"></label>
+    <label>Notes <textarea name="notes" rows="3" required maxlength="4000" placeholder="What was done, who asked, and why it was done outside WFT"></textarea></label>
+    <label>Linked request (optional) <input name="linked_request" value="{{ link }}" placeholder="e.g. LIM-2026-0012"></label>
+    <div class="actions"><button type="submit">Log it</button></div>
+    <p class="help">You can attach files (emails, screenshots) on the next page.</p>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Records</h2>
+  <form method="get" action="/off-process" class="row filters">
+    <label>Search <input name="q" value="{{ filters.q }}" placeholder="Reference, what, notes"></label>
+    <label>Reason
+      <select name="reason"><option value="">Any</option>
+        {% for r in reasons %}<option value="{{ r.id }}" {% if filters.reason == r.id %}selected{% endif %}>{{ r.label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>System
+      <select name="system"><option value="">Any</option>
+        {% for s in systems %}<option value="{{ s }}" {% if filters.system == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="secondary">Filter</button>
+  </form>
+  {% if records %}
+  {% include "_off_process_table.html" %}
+  {% else %}<p class="muted">No off-process records{% if filters.q or filters.reason or filters.system %} match{% endif %}.</p>{% endif %}
+</section>
+{% endblock %}

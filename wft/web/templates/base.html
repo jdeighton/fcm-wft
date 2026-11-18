@@ -16,6 +16,7 @@
       <a href="/tasks">My tasks{% if my_task_count %} <span class="badge">{{ my_task_count }}</span>{% endif %}</a>
       <a href="/">Requests</a>
       <a href="/waiting">Waiting on</a>
+      <a href="/off-process">Off-process</a>
       <a href="/flags">Flags{% if open_flag_count %} <span class="badge badge-warn">{{ open_flag_count }}</span>{% endif %}</a>
     </nav>
     <span class="who">{{ user | person }}{% if is_admin %} <span class="badge">Admin</span>{% endif %}</span>

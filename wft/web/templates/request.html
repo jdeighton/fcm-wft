@@ -17,6 +17,7 @@
     {% if req.holds %}· on hold {{ time_on_hold(req) | duration }} in total{% endif %}
   </p>
   {% if original %}<p class="small">Follow-up to <a href="/requests/{{ original.request_id }}">{{ original.reference or original.title }}</a></p>{% endif %}
+  {% if linked_off_process %}<p class="small">Off-process records: {% for r in linked_off_process %}<a href="/off-process/{{ r.record_id }}">{{ r.reference or "pending" }}</a> ({{ r.what }}){% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
   {% if follow_ups %}<p class="small">Follow-ups: {% for f in follow_ups %}<a href="/requests/{{ f.request_id }}">{{ f.reference or f.title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
   {% if req.status in ("Completed", "Cancelled", "Rejected") %}
   <p>Owner: <strong>{{ req.owner | person }}</strong></p>
@@ -47,6 +48,9 @@
 <div class="banner banner-flag" role="status"><strong>All steps are done.</strong> Resolve the open flags below to complete the request.</div>
 {% endif %}
 
+{% if req.status not in ("Draft",) %}
+<p class="small"><a href="/off-process?link={{ req.reference or req.request_id }}">Log an off-process setup for this request…</a></p>
+{% endif %}
 {% if req.status in ("Completed", "Cancelled") %}
 <section class="card">
   <form method="post" action="/requests/{{ req.request_id }}/follow-up" class="row inline-form">
@@ -249,6 +253,13 @@
   {% endif %}
   {% if workable %}
   <div class="row step-actions">
+    <details class="wait-form outside-form">
+      <summary>Done outside WFT…</summary>
+      <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/outside" class="row inline-form">
+        <label>What was done, and why outside WFT <input name="notes" required maxlength="1000" placeholder="e.g. done directly in TT Setup during an outage"></label>
+        <button type="submit" class="secondary">Mark done outside WFT</button>
+      </form>
+    </details>
     {% if s.status == "ready" %}
     <form method="post" action="/requests/{{ req.request_id }}/steps/{{ s.id }}/start"><button type="submit" class="secondary">Start</button></form>
     {% endif %}
@@ -269,6 +280,9 @@
   {% set step_files = req.attachments | selectattr("step", "equalto", s.id) | list %}
   {% if step_files %}
   <p class="small">📎 {% for a in step_files %}<a href="/requests/{{ req.request_id }}/attachments/{{ a.sha256 }}">{{ a.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% endif %}
+  {% if s.status == "done_outside_tool" %}
+  <p class="outside-note">Done outside WFT by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC: {{ s.data.outside_tool_notes }}</p>
   {% endif %}
   {% if s.status == "done" %}
   <p class="muted">Completed by {{ s.completed_by | person }} at {{ s.completed_at | utc }} UTC</p>
