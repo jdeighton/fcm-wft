@@ -135,7 +135,7 @@ class Services:
         self.adapters = adapters or {}
         self.picklists = picklists
         self.reasons_source = reasons
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # re-entrant: follow-ups (e.g. starting sub-requests) run inside an action
         self._read_only_reason: str | None = None
         self._read_only_since: str | None = None
         self._stop = threading.Event()
@@ -162,6 +162,7 @@ class Services:
             log.info("Share reachable again; leaving read-only mode")
             self._read_only_reason = self._read_only_since = None
         self.assign_pending_references()
+        self.follow_up_my_requests()
         return True
 
     def assign_pending_references(self) -> None:
@@ -231,7 +232,8 @@ class Services:
     def my_conflicts(self) -> list[Event]:
         """My actions that lost to someone else's concurrent action and that I haven't dismissed."""
         acknowledged = self._acknowledged()
-        return [e for e in self.rm.conflicts_for(self.user) if e.event_id not in acknowledged]
+        return [e for e in self.rm.conflicts_for(self.user)
+                if e.event_id not in acknowledged and not e.payload.get("auto")]  # automatic steps aren't the user's
 
     def acknowledge_conflict(self, event_id: str) -> None:
         if self._acknowledged_path is None:
@@ -318,8 +320,8 @@ class Services:
             except KeyError:
                 continue
             for st in r.steps:
-                if st.status not in engine.OPEN_STEP:
-                    continue
+                if st.status not in engine.OPEN_STEP or defn.step(st.id).type in ("subworkflow", "decision"):
+                    continue  # those steps move on by themselves
                 task = Task(r, st.id, defn.step(st.id).title, defn.title)
                 if st.assignee == user:
                     mine.append(task)
@@ -549,19 +551,157 @@ class Services:
             raise CommandError(f"{att.name} isn't on the shared drive (is it reachable?)") from None
 
     def hold(self, request_id: str, reason: str) -> None:
+        """Hold the request and its active child requests; flag children with work in progress."""
         with self._lock:
             state, defn = self._load(request_id)
-            self._record(request_id, defn, engine.hold_request(state, defn, reason))
+            children = self.children(request_id)
+            flags = [self._child_flag(c, "is in progress; it has been put on hold too") for c in children
+                     if c.status == engine.ACTIVE and _worked_on(c)]
+            self._record(request_id, defn, engine.hold_request(state, defn, reason, flags))
+            label = state.reference or state.title
+            for child in children:
+                if child.status == engine.ACTIVE:
+                    cstate, cdefn = self._load(child.request_id)
+                    self._record(child.request_id, cdefn, engine.hold_request(
+                        cstate, cdefn, f"Parent {label} on hold: {reason}", by_parent=request_id))
 
     def resume(self, request_id: str) -> None:
+        """Resume the request, and child requests that were held because it was."""
         with self._lock:
             state, defn = self._load(request_id)
             self._record(request_id, defn, engine.resume_request(state, defn))
+            for child in self.children(request_id):
+                current = next((h for h in child.holds if h.end is None), None)
+                if child.status == engine.ON_HOLD and current and current.by_parent == request_id:
+                    cstate, cdefn = self._load(child.request_id)
+                    self._record(child.request_id, cdefn, engine.resume_request(cstate, cdefn, auto=True))
 
     def cancel(self, request_id: str, reason: str) -> None:
+        """Cancel the request and its unfinished child requests; flag children that were worked on or completed."""
         with self._lock:
             state, defn = self._load(request_id)
-            self._record(request_id, defn, engine.cancel_request(state, defn, reason))
+            children = self.children(request_id)
+            flags = []
+            for c in children:
+                if c.status == engine.COMPLETED:
+                    flags.append(self._child_flag(c, "was completed: check whether it needs undoing"))
+                elif c.status in (engine.ACTIVE, engine.ON_HOLD) and _worked_on(c):
+                    flags.append(self._child_flag(c, "had work in progress: check what needs undoing"))
+            self._record(request_id, defn, engine.cancel_request(state, defn, reason, flags))
+            label = state.reference or state.title
+            for child in children:
+                if child.status in (engine.DRAFT, engine.ACTIVE, engine.ON_HOLD):
+                    cstate, cdefn = self._load(child.request_id)
+                    self._record(child.request_id, cdefn, engine.cancel_request(
+                        cstate, cdefn, f"Parent {label} cancelled: {reason}", auto=True))
+
+    # --- sub-workflows, decisions, approvals ----------------------------------------
+
+    def children(self, request_id: str) -> list[RequestState]:
+        return sorted((r for r in self.rm.list_requests() if (r.parent or {}).get("request") == request_id),
+                      key=lambda r: ((r.parent or {}).get("step", ""), (r.parent or {}).get("index", 0)))
+
+    def _child_flag(self, child: RequestState, what: str) -> dict:
+        return {"child": child.request_id, "step": child.parent["step"],
+                "action": f"Sub-request {child.reference or child.title} {what}"}
+
+    def follow_up(self, request_id: str) -> None:
+        """Do what should happen automatically after a change: start sub-requests, complete joins, tell the parent."""
+        with self._lock:
+            state = self.rm.get(request_id)
+            if state is None:
+                return
+            if state.status == engine.ACTIVE:
+                defn = self.registry.get(state.workflow)
+                for st in state.steps:
+                    if defn.step(st.id).type != "subworkflow" or st.status not in engine.WORKABLE:
+                        continue
+                    if (st.data or {}).get("children") is None:
+                        self._start_children(state, defn, st.id)
+                    else:
+                        self._try_join(request_id, st.id)
+            if state.parent and state.status == engine.COMPLETED:
+                self._try_join(state.parent["request"], state.parent["step"])
+
+    def follow_up_my_requests(self) -> None:
+        """On each sync: catch up on automatic steps for requests I own (in case an earlier attempt was cut short)."""
+        if self._read_only_reason is not None:
+            return
+        for r in self.rm.list_requests():
+            if r.owner == self.user and r.status == engine.ACTIVE and any(
+                    st.status in engine.WORKABLE for st in r.steps):
+                try:
+                    defn = self.registry.get(r.workflow)
+                except KeyError:
+                    continue
+                if any(defn.step(st.id).type == "subworkflow" and st.status in engine.WORKABLE for st in r.steps):
+                    try:
+                        self.follow_up(r.request_id)
+                    except (CommandError, ReadOnly) as e:
+                        log.warning("Couldn't catch up on %s: %s", r.request_id, e)
+
+    def _start_children(self, state: RequestState, defn: WorkflowDef, step_id: str) -> None:
+        sd = defn.step(step_id)
+        child_id = sd.raw["workflow"]
+        child_defn = next((w for w in self.registry.latest() if w.id == child_id), None)
+        if child_defn is None:
+            log.warning("Can't start sub-requests for %s: workflow %s isn't published", state.request_id, child_id)
+            return
+        planned = engine.plan_children(state, defn, step_id)
+        for child in planned:
+            child["id"] = new_id()
+        self._record(state.request_id, defn,
+                     engine.start_subworkflow(state, defn, step_id, child_defn.key, planned), follow=False)
+        for child in planned:
+            parent = {"request": state.request_id, "step": step_id, "index": child["index"]}
+            self._record(child["id"], child_defn, engine.create_request(child_defn, child["title"], parent=parent),
+                         follow=False)
+            cstate = self.rm.get(child["id"])
+            forms = {f.id: _for_form(f, child["inputs"]) for f in engine.initial_forms(child_defn)}
+            try:
+                self._record(child["id"], child_defn, engine.submit_request(cstate, child_defn, forms))
+            except engine.FormInvalid:
+                # Left as a Draft (with what could be filled in) for someone to complete.
+                for f in engine.initial_forms(child_defn):
+                    self._record(child["id"], child_defn, engine.save_form(self.rm.get(child["id"]), child_defn,
+                                                                           f.id, forms[f.id]), follow=False)
+            else:
+                self._assign_reference(child["id"])
+        self._try_join(state.request_id, step_id)  # e.g. `for_each` over an empty list
+
+    def _try_join(self, request_id: str, step_id: str) -> None:
+        state = self.rm.get(request_id)
+        if state is None or state.status != engine.ACTIVE:
+            return
+        step = state.step(step_id)
+        children = (step.data or {}).get("children")
+        if step.status not in engine.WORKABLE or children is None:
+            return
+        status = {}
+        for c in children:
+            cs = self.rm.get(c["id"])
+            status[c["id"]] = (cs.status, cs.reference) if cs else ("missing", None)
+        if all(v[0] == engine.COMPLETED for v in status.values()):
+            defn = self.registry.get(state.workflow)
+            self._record(request_id, defn, engine.complete_subworkflow(state, defn, step_id, status))
+
+    def choose_branch(self, request_id: str, step_id: str, chosen: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.choose_branch(state, defn, step_id, chosen))
+
+    def approve(self, request_id: str, step_id: str, notes: str = "") -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            role = defn.step(step_id).raw.get("approver_role")
+            if role == "admin" and not self.is_admin:
+                raise CommandError("Only an admin can give this approval")
+            self._record(request_id, defn, engine.approve(state, defn, step_id, self.user, notes))
+
+    def reject_approval(self, request_id: str, step_id: str, notes: str) -> None:
+        with self._lock:
+            state, defn = self._load(request_id)
+            self._record(request_id, defn, engine.reject_approval(state, defn, step_id, notes))
 
     def resolve_flag(self, request_id: str, flag_id: str, resolution: str, notes: str = "",
                      linked_request: str | None = None) -> None:
@@ -735,7 +875,7 @@ class Services:
             raise NotFound(request_id)
         return state, self.registry.get(state.workflow)
 
-    def _record(self, request_id: str, defn: WorkflowDef | str, new: NewEvent) -> None:
+    def _record(self, request_id: str, defn: WorkflowDef | str, new: NewEvent, follow: bool = True) -> None:
         """Stamp and store an event. `defn` is the workflow definition, or a definition key (off-process records)."""
         if self._read_only_reason is not None:
             raise ReadOnly("The share is unavailable, so changes are blocked until it's back")
@@ -750,3 +890,17 @@ class Services:
             self._go_read_only(e)
             raise ReadOnly("The share became unavailable; your change was not saved") from e
         self.rm.ingest([event])
+        if follow and not isinstance(defn, str) and new.seq != engine.ANNOTATION_SEQ:
+            self.follow_up(request_id)
+
+
+def _worked_on(state: RequestState) -> bool:
+    """Whether anyone has done work on the request beyond capturing its details."""
+    return any(st.status in engine.WORKED_ON and st.transitions and st.transitions[0].status != engine.IN_PROGRESS
+               for st in state.steps) or any(st.status == engine.WAITING for st in state.steps)
+
+
+def _for_form(form: WorkflowDef | object, inputs: dict) -> dict:
+    """The mapped inputs a child's capture form takes (all of them if the form doesn't list its fields)."""
+    props = ((getattr(form, "form_schema", None) or {}).get("properties")) or None
+    return {k: v for k, v in inputs.items() if props is None or k in props}

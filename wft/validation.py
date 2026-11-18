@@ -111,6 +111,13 @@ def validate_repo(definitions_dir: Path, share_root: Path | None = None,
                 report.issues.append(Issue(source, f"not valid YAML: {e}"))
 
     known_ids = {k for k in loaded if isinstance(k, str)}
+    # Sub-workflows mustn't start each other in a loop (A starts B starts A).
+    calls = {wid: [st.get("workflow") for st in (data.get("steps") or []) if isinstance(st, dict)
+                   and st.get("type") == "subworkflow" and st.get("workflow") in loaded]
+             for wid, (_, data) in loaded.items() if isinstance(wid, str)}
+    loop = _find_cycle(calls)
+    if loop:
+        report.issues.append(Issue("workflows", f"sub-workflows start each other in a loop: {' -> '.join(loop)}"))
     for wid, (path, data) in loaded.items():
         source = path.relative_to(definitions_dir).as_posix()
         report.checked.append(source)
@@ -118,7 +125,7 @@ def validate_repo(definitions_dir: Path, share_root: Path | None = None,
         report.issues += [Issue(source, m, lvl) for lvl, m in issues]
         if any(lvl == "error" for lvl, _ in issues):
             continue
-        defn = parse_workflow(data, definitions_dir)
+        defn = parse_workflow(_choose_decisions_by_hand(data), definitions_dir)
         report.issues += [Issue(source, m) for m in dry_run(defn, load_samples(definitions_dir, wid) or {})]
         if share_root is not None:
             report.issues += [Issue(source, m) for m in check_version_bump(path, definitions_dir, data, share_root)]
@@ -228,6 +235,13 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
                 err(f"step {s['id']!r}: {what} {wf!r} is not a known workflow")
     deps = {s["id"]: [d for d in s.get("depends_on", ()) if d in step_ids] for s in steps}
     for s in steps:
+        if s["type"] != "decision":
+            continue
+        targets = [b["next"] for b in s.get("branches", ())] + ([s["default"]] if s.get("default") else [])
+        for t in targets:
+            if t in step_ids and s["id"] not in deps.get(t, ()):
+                err(f"decision {s['id']!r}: option {t!r} must depend on the decision step")
+    for s in steps:
         target = (s.get("on_amend") or {}).get("route_to")
         if target in step_ids and target not in _ancestors(deps, s["id"]):
             err(f"step {s['id']!r}: on_amend.route_to {target!r} must be a step it depends on (directly or not)")
@@ -300,6 +314,12 @@ def check_definition(data: dict, base: Path, known_ids: set[str],
     except DefinitionError as e:
         err(str(e))
     return out
+
+
+def _choose_decisions_by_hand(data: dict) -> dict:
+    """A copy whose decisions wait for a choice, so the dry run tries every option rather than the one the samples pick."""
+    return {**data, "steps": [{**s, "_choose_by_hand": True} if s.get("type") == "decision" else s
+                              for s in data["steps"]]}
 
 
 def load_samples(base: Path, workflow_id: str) -> Any:

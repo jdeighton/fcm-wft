@@ -440,6 +440,12 @@ Sub-workflow syntax (supported by engine in R1, used in later releases):
     depends_on: [create_client]
 ```
 
+Sub-workflows, decisions and approvals (engine support in Release 1; no business workflow uses them yet):
+- **subworkflow:** when the step is reached, the person whose action reached it starts one child request per `for_each` item (or one, without `for_each`), using the latest published version of `workflow`, with inputs from `map_inputs` (`item` is the current element). Children whose inputs are complete are submitted straight away; others are left as Drafts. The step completes when every child is Completed; whoever completes the last child completes it, and the parent's owner catches up on the next poll if that was missed. A cancelled child leaves the step open (start a replacement, or mark it done outside WFT). Holding a parent holds its active children and flags in-progress ones; resuming it resumes the children it held; cancelling it cancels unfinished children and flags children that were worked on or completed.
+- **decision:** settles itself when reached: the first branch whose `when` is true, else `default`, else someone chooses. Options not taken are skipped, as are steps that depend only on skipped steps. The validator's dry run tries every option.
+- **approval:** Approve (optional notes) or Don't approve (reason required; recorded, and the step stays open). The person who submitted the request can't approve unless `allow_submitter: true`; `approver_role: admin` requires an admin.
+- Automatic steps (starting children, joins, passing hold or cancel to children) never show conflict warnings.
+
 Rules:
 - Requests are pinned to the definition `id` + `version` they started on.
 - Definitions reference schemas, checklists (Markdown) and mappings by relative path: schema refs under `schemas/`, checklist refs under `checklists/`, mapping refs under `mappings/`. A checklist may be an inline list or a Markdown file of `- item` lines.

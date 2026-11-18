@@ -93,3 +93,9 @@ def tt_services(share, tmp_path, tt_registry):
     svc.adapters = {"tt": FakeTT()}
     svc.picklists = PicklistCache(tmp_path / "picklists.json", 3600)
     return svc
+
+
+@pytest.fixture
+def family_registry(tmp_path) -> DefinitionRegistry:
+    from tests.defs import CHILD, FAMILY_FILES, PARENT, write_defs
+    return DefinitionRegistry.from_repo(write_defs(tmp_path / "family-defs", PARENT, CHILD, files=FAMILY_FILES))
